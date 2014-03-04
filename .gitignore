@@ -1,0 +1,10 @@
+*.o
+
+include/list.h
+include/mini-os
+include/x86/mini-os
+include/xen
+
+arch/x86/libx86_64.a
+mini-os
+mini-os.gz
