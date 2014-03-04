@@ -1,6 +1,3 @@
-# Set mini-os root path, used in mini-os.mk.
-MINI-OS_ROOT=$(XEN_ROOT)/extras/mini-os
-export MINI-OS_ROOT
 
 libc = $(stubdom)
 
