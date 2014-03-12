@@ -12,7 +12,7 @@ static inline struct thread* get_current(void)
 #else
     register unsigned long sp asm("rsp");
 #endif 
-    current = (void *)(unsigned long)(sp & ~(__STACK_SIZE-1));
+    current = (struct thread**)(unsigned long)(sp & ~(__STACK_SIZE-1));
     return *current;
 }
 

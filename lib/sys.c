@@ -379,7 +379,11 @@ off_t lseek(int fd, off_t offset, int whence)
           break;
 #endif
        case FTYPE_FILE:
+#ifdef __cplusplus
+          target = &files[fd].file_fd.offset;
+#else
           target = &files[fd].file.offset;
+#endif
           break;
        default:
           /* Not implemented for this filetype */

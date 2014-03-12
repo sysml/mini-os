@@ -166,7 +166,11 @@ extern struct file {
             /* FS import fd */
 	    int fd;
 	    off_t offset;
+#ifdef __cplusplus
+    } file_d;
+#else
 	} file;
+#endif
 	struct {
 	    struct evtchn_port_list ports;
 	} evtchn;

@@ -180,7 +180,9 @@ static inline int
 HYPERVISOR_shutdown(
 	unsigned int reason)
 {
-	struct sched_shutdown shutdown = { .reason = reason };
+	struct sched_shutdown shutdown;
+	shutdown.reason = reason ;
+
 	return _hypercall2(int, sched_op, SCHEDOP_shutdown, &shutdown);
 }
 

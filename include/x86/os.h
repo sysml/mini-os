@@ -10,8 +10,8 @@
 #if __GNUC__ == 2 && __GNUC_MINOR__ < 96
 #define __builtin_expect(x, expected_value) (x)
 #endif
-#define unlikely(x)  __builtin_expect((x),0)
-#define likely(x)  __builtin_expect((x),1)
+#define unlikely(x)  __builtin_expect(!!(x),0)
+#define likely(x)  __builtin_expect(!!(x),1)
 
 #define smp_processor_id() 0
 
@@ -458,58 +458,58 @@ static __inline__ unsigned long __ffs(unsigned long word)
 struct __synch_xchg_dummy { unsigned long a[100]; };
 #define __synch_xg(x) ((struct __synch_xchg_dummy *)(x))
 
-#define synch_cmpxchg(ptr, old, new) \
+#define synch_cmpxchg(ptr, old_ptr, new) \
 ((__typeof__(*(ptr)))__synch_cmpxchg((ptr),\
-                                     (unsigned long)(old), \
+                                     (unsigned long)(old_ptr), \
                                      (unsigned long)(new), \
                                      sizeof(*(ptr))))
 
 static inline unsigned long __synch_cmpxchg(volatile void *ptr,
-        unsigned long old,
-        unsigned long new, int size)
+        unsigned long old_ptr,
+        unsigned long new_ptr, int size)
 {
     unsigned long prev;
     switch (size) {
         case 1:
             __asm__ __volatile__("lock; cmpxchgb %b1,%2"
                     : "=a"(prev)
-                    : "q"(new), "m"(*__synch_xg(ptr)),
-                    "0"(old)
+                    : "q"(new_ptr), "m"(*__synch_xg(ptr)),
+                    "0"(old_ptr)
                     : "memory");
             return prev;
         case 2:
             __asm__ __volatile__("lock; cmpxchgw %w1,%2"
                     : "=a"(prev)
-                    : "r"(new), "m"(*__synch_xg(ptr)),
-                    "0"(old)
+                    : "r"(new_ptr), "m"(*__synch_xg(ptr)),
+                    "0"(old_ptr)
                     : "memory");
             return prev;
 #ifdef __x86_64__
         case 4:
             __asm__ __volatile__("lock; cmpxchgl %k1,%2"
                     : "=a"(prev)
-                    : "r"(new), "m"(*__synch_xg(ptr)),
-                    "0"(old)
+                    : "r"(new_ptr), "m"(*__synch_xg(ptr)),
+                    "0"(old_ptr)
                     : "memory");
             return prev;
         case 8:
             __asm__ __volatile__("lock; cmpxchgq %1,%2"
                     : "=a"(prev)
-                    : "r"(new), "m"(*__synch_xg(ptr)),
-                    "0"(old)
+                    : "r"(new_ptr), "m"(*__synch_xg(ptr)),
+                    "0"(old_ptr)
                     : "memory");
             return prev;
 #else
         case 4:
             __asm__ __volatile__("lock; cmpxchgl %1,%2"
                     : "=a"(prev)
-                    : "r"(new), "m"(*__synch_xg(ptr)),
-                    "0"(old)
+                    : "r"(new_ptr), "m"(*__synch_xg(ptr)),
+                    "0"(old_ptr)
                     : "memory");
             return prev;
 #endif
     }
-    return old;
+    return old_ptr;
 }
 
 
