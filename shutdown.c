@@ -1,5 +1,6 @@
 #include <mini-os/os.h>
 #include <mini-os/events.h>
+#include <mini-os/kernel.h>
 #include <mini-os/sched.h>
 #include <mini-os/shutdown.h>
 #include <mini-os/xenbus.h>
@@ -45,5 +46,34 @@ static void shutdown_thread(void *p)
 void init_shutdown(void)
 {
     create_thread("shutdown", shutdown_thread, NULL);
+}
+
+void kernel_shutdown(int reason)
+{
+    char* reason_str = NULL;
+
+    switch(reason) {
+        case SHUTDOWN_poweroff:
+            reason_str = "poweroff";
+            break;
+        case SHUTDOWN_reboot:
+            reason_str = "poweroff";
+            break;
+        case SHUTDOWN_crash:
+            reason_str = "crash";
+            break;
+        default:
+            do_exit();
+            break;
+    }
+
+    printk("MiniOS will shutdown (reason = %s) ...\n", reason_str);
+
+    stop_kernel();
+
+    for ( ;; ) {
+        struct sched_shutdown sched_shutdown = { .reason = SHUTDOWN_poweroff };
+        HYPERVISOR_sched_op(SCHEDOP_shutdown, &sched_shutdown);
+    }
 }
 

@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <xenbus.h>
 #include <events.h>
+#include <mini-os/shutdown.h>
 
 extern int main(int argc, char *argv[], char *envp[]);
 extern void __libc_init_array(void);
@@ -174,13 +175,7 @@ void _exit(int ret)
 #if defined(HAVE_LWIP) && defined(CONFIG_NETFRONT)
     stop_networking();
 #endif
-    stop_kernel();
-    if (!ret) {
-	/* No problem, just shutdown.  */
-        struct sched_shutdown sched_shutdown = { .reason = SHUTDOWN_poweroff };
-        HYPERVISOR_sched_op(SCHEDOP_shutdown, &sched_shutdown);
-    }
-    do_exit();
+    kernel_shutdown(ret);
 }
 
 int app_main(start_info_t *si)
