@@ -169,6 +169,7 @@ MINIOS_OBJS0-y		:=	\
 	mm.o				\
 	printf.o			\
 	sched.o				\
+	shutdown.o			\
 	stack_chk_fail.o	\
 	string.o			\
 	sys.o				\
