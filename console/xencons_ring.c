@@ -188,8 +188,13 @@ struct consfront_dev *xencons_ring_init(void)
 	return dev;
 }
 
-void xencons_resume(void)
+void xencons_ring_fini(struct consfront_dev **dev)
 {
-	(void)xencons_ring_init();
+    if (!dev || !(*dev)) {
+        unbind_evtchn(start_info.console.domU.evtchn);
+    } else {
+        unbind_evtchn((*dev)->evtchn);
+        free(*dev);
+        (*dev) = NULL;
+    }
 }
-

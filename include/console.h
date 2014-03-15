@@ -75,10 +75,13 @@ void xencons_tx(void);
 void init_console(void);
 void console_print(struct consfront_dev *dev, char *data, int length);
 void fini_console(struct consfront_dev *dev);
+void suspend_console(void);
+void resume_console(void);
 
 /* Low level functions defined in xencons_ring.c */
 extern struct wait_queue_head console_queue;
 struct consfront_dev *xencons_ring_init(void);
+void xencons_ring_fini(struct consfront_dev **dev);
 struct consfront_dev *init_consfront(char *_nodename);
 int xencons_ring_send(struct consfront_dev *dev, const char *data, unsigned len);
 int xencons_ring_send_no_notify(struct consfront_dev *dev, const char *data, unsigned len);

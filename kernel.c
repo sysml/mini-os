@@ -178,10 +178,14 @@ void pre_suspend(void)
     suspend_gnttab();
 
     suspend_time();
+
+    suspend_console();
 }
 
 void post_suspend(void)
 {
+    resume_console();
+
     resume_time();
 
     resume_gnttab();
