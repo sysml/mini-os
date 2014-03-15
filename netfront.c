@@ -69,6 +69,10 @@ struct netfront_dev {
 
 struct netfront_dev_list {
     struct netfront_dev *dev;
+    unsigned char rawmac[6];
+    char *ip;
+
+    int refcount;
 
     struct netfront_dev_list *next;
 };
@@ -327,7 +331,11 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
     /* Check if the device is already initialized */
     for ( list = dev_list; list != NULL; list = list->next) {
         if (strcmp(nodename, list->dev->nodename) == 0) {
-            return list->dev;
+            list->refcount++;
+            dev = list->dev;
+            if (thenetif_rx)
+                netfront_set_rx_handler(dev, thenetif_rx, NULL);
+            goto out;
         }
     }
 
@@ -346,8 +354,9 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
     ldev = malloc(sizeof(struct netfront_dev_list));
     memset(ldev, 0, sizeof(struct netfront_dev_list));
 
-    if (_init_netfront(dev, rawmac, ip)) {
+    if (_init_netfront(dev, ldev->rawmac, &(ldev->ip))) {
         ldev->dev = dev;
+        ldev->refcount = 1;
         ldev->next = NULL;
 
         if (!dev_list) {
@@ -363,8 +372,24 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
         free(dev);
         free(ldev);
         dev = NULL;
+        goto err;
     }
 
+out:
+    if (rawmac) {
+        rawmac[0] = ldev->rawmac[0];
+        rawmac[1] = ldev->rawmac[1];
+        rawmac[2] = ldev->rawmac[2];
+        rawmac[3] = ldev->rawmac[3];
+        rawmac[4] = ldev->rawmac[4];
+        rawmac[5] = ldev->rawmac[5];
+    }
+    if (ip) {
+        *ip = malloc(strlen(ldev->ip));
+        strncpy(*ip, ldev->ip, strlen(ldev->ip));
+    }
+
+err:
     return dev;
 }
 
@@ -573,18 +598,21 @@ void shutdown_netfront(struct netfront_dev *dev)
         return;
     }
 
-    _shutdown_netfront(dev);
-    free(dev->nodename);
-    free(dev);
+    list->refcount--;
+    if (list->refcount == 0) {
+        _shutdown_netfront(dev);
+        free(dev->nodename);
+        free(dev);
 
-    to_del = list;
-    if (to_del == dev_list) {
-        free(to_del);
-        dev_list = NULL;
-    } else {
-        for ( list = dev_list; list->next != to_del; list = list->next );
-        list->next = to_del->next;
-        free(to_del);
+        to_del = list;
+        if (to_del == dev_list) {
+            free(to_del);
+            dev_list = NULL;
+        } else {
+            for ( list = dev_list; list->next != to_del; list = list->next );
+            list->next = to_del->next;
+            free(to_del);
+        }
     }
 }
 
