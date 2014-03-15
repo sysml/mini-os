@@ -201,3 +201,33 @@ fini_gnttab(void)
 
     HYPERVISOR_grant_table_op(GNTTABOP_setup_table, &setup, 1);
 }
+
+void
+suspend_gnttab(void)
+{
+    int i;
+
+    for (i = 0; i < NR_GRANT_FRAMES; i++) {
+        HYPERVISOR_update_va_mapping((unsigned long)(((char *)gnttab_table) + PAGE_SIZE*i),
+                (pte_t){0x0<<PAGE_SHIFT}, UVMF_INVLPG);
+    }
+}
+
+void
+resume_gnttab(void)
+{
+    int i;
+    struct gnttab_setup_table setup;
+    unsigned long frames[NR_GRANT_FRAMES];
+
+    setup.dom = DOMID_SELF;
+    setup.nr_frames = NR_GRANT_FRAMES;
+    set_xen_guest_handle(setup.frame_list, frames);
+
+    HYPERVISOR_grant_table_op(GNTTABOP_setup_table, &setup, 1);
+
+    for (i = 0; i < NR_GRANT_FRAMES; i++) {
+        HYPERVISOR_update_va_mapping((unsigned long)(((char *)gnttab_table) + PAGE_SIZE*i),
+                (pte_t){(frames[i] << PAGE_SHIFT) | L1_PROT}, UVMF_INVLPG);
+    }
+}

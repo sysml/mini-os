@@ -174,10 +174,14 @@ void pre_suspend(void)
     suspend_xenbus();
 
     local_irq_disable();
+
+    suspend_gnttab();
 }
 
 void post_suspend(void)
 {
+    resume_gnttab();
+
     local_irq_enable();
 
     resume_xenbus();
