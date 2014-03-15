@@ -49,6 +49,7 @@ DECLARE_WAIT_QUEUE_HEAD(xenbus_watch_queue);
 xenbus_event_queue xenbus_events;
 static struct watch {
     char *token;
+    char *path;
     xenbus_event_queue *events;
     struct watch *next;
 } *watches;
@@ -61,6 +62,8 @@ struct xenbus_req_info
 
 #define NR_REQS 32
 static struct xenbus_req_info req_info[NR_REQS];
+
+static char *errmsg(struct xsd_sockmsg *rep);
 
 static void memcpy_from_ring(const void *Ring,
         void *Dest,
@@ -359,6 +362,51 @@ void fini_xenbus(void)
 {
 }
 
+void suspend_xenbus(void)
+{
+    /* Check for live requests and wait until they finish */
+    while (1)
+    {
+        spin_lock(&req_lock);
+        if (nr_live_reqs == 0)
+            break;
+        spin_unlock(&req_lock);
+        wait_event(req_wq, (nr_live_reqs == 0));
+    }
+
+    unbind_evtchn(start_info.store_evtchn);
+    xenstore_buf = NULL;
+    spin_unlock(&req_lock);
+}
+
+void resume_xenbus(void)
+{
+    char *msg;
+    struct watch *watch;
+    struct write_req req[2];
+    struct xsd_sockmsg *rep;
+
+    xenstore_buf = mfn_to_virt(start_info.store_mfn);
+
+    bind_evtchn(start_info.store_evtchn, xenbus_evtchn_handler, NULL);
+    unmask_evtchn(start_info.store_evtchn);
+
+    for (watch = watches; watch; watch = watch->next) {
+        req[0].data = watch->path;
+        req[0].len = strlen(watch->path) + 1;
+        req[1].data = watch->token;
+        req[1].len = strlen(watch->token) + 1;
+
+        rep = xenbus_msg_reply(XS_WATCH, XBT_NIL, req, ARRAY_SIZE(req));
+        msg = errmsg(rep);
+        if (msg)
+            xprintk("error on XS_WATCH: %s\n", msg);
+        free(rep);
+    }
+
+    notify_remote_via_evtchn(start_info.store_evtchn);
+}
+
 /* Send data to xenbus.  This can block.  All of the requests are seen
    by xenbus as if sent atomically.  The header is added
    automatically, using type %type, req_id %req_id, and trans_id
@@ -580,6 +628,7 @@ char* xenbus_watch_path_token( xenbus_transaction_t xbt, const char *path, const
         events = &xenbus_events;
 
     watch->token = strdup(token);
+    watch->path = strdup(path);
     watch->events = events;
     watch->next = watches;
     watches = watch;
@@ -615,6 +664,7 @@ char* xenbus_unwatch_path_token( xenbus_transaction_t xbt, const char *path, con
     for (prev = &watches, watch = *prev; watch; prev = &watch->next, watch = *prev)
         if (!strcmp(watch->token, token)) {
             free(watch->token);
+            free(watch->path);
             *prev = watch->next;
             free(watch);
             break;

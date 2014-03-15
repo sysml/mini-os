@@ -118,4 +118,20 @@ static inline void fini_xenbus(void)
 }
 #endif
 
+#ifdef CONFIG_XENBUS
+void suspend_xenbus(void);
+#else
+static inline void suspend_xenbus(void)
+{
+}
+#endif
+
+#ifdef CONFIG_XENBUS
+void resume_xenbus(void);
+#else
+static inline void resume_xenbus(void)
+{
+}
+#endif
+
 #endif /* XENBUS_H__ */

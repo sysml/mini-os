@@ -171,12 +171,16 @@ void stop_kernel(void)
 
 void pre_suspend(void)
 {
+    suspend_xenbus();
+
     local_irq_disable();
 }
 
 void post_suspend(void)
 {
     local_irq_enable();
+
+    resume_xenbus();
 }
 
 /*
