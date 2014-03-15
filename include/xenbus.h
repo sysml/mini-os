@@ -34,6 +34,7 @@ char *xenbus_unwatch_path_token(xenbus_transaction_t xbt, const char *path, cons
 extern struct wait_queue_head xenbus_watch_queue;
 void xenbus_wait_for_watch(xenbus_event_queue *queue);
 char **xenbus_wait_for_watch_return(xenbus_event_queue *queue);
+void xenbus_release_wait_for_watch(xenbus_event_queue *queue);
 char* xenbus_wait_for_value(const char *path, const char *value, xenbus_event_queue *queue);
 char *xenbus_wait_for_state_change(const char* path, XenbusState *state, xenbus_event_queue *queue);
 char *xenbus_switch_state(xenbus_transaction_t xbt, const char* path, XenbusState state);
