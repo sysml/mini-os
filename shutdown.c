@@ -11,6 +11,8 @@ static start_info_t *start_info_ptr;
 
 static const char *path = "control/shutdown";
 static const char *token = "control/shutdown";
+static xenbus_event_queue events = NULL;
+static int end_shutdown_thread = 0;
 
 /* This should be overridden by the application we are linked against. */
 __attribute__((weak)) void app_shutdown(unsigned reason)
@@ -20,7 +22,6 @@ __attribute__((weak)) void app_shutdown(unsigned reason)
 
 static void shutdown_thread(void *p)
 {
-    xenbus_event_queue events = NULL;
     char *shutdown, *err;
     unsigned int shutdown_reason;
 
@@ -32,6 +33,9 @@ static void shutdown_thread(void *p)
             free(err);
             do_exit();
         }
+
+        if (end_shutdown_thread)
+            break;
 
         if (!strcmp(shutdown, "")) {
             /* Avoid spurious event on xenbus */
@@ -63,8 +67,8 @@ static void fini_shutdown(void)
 {
     char *err;
 
-    /* FIXME: Find a way to make xenbus_wait_for_watch exit */
-
+    end_shutdown_thread = 1;
+    xenbus_release_wait_for_watch(&events);
     err = xenbus_unwatch_path_token(XBT_NIL, path, token);
     if (err) {
         free(err);
@@ -75,6 +79,8 @@ static void fini_shutdown(void)
 void init_shutdown(start_info_t *si)
 {
     start_info_ptr = si;
+
+    end_shutdown_thread = 0;
     create_thread("shutdown", shutdown_thread, NULL);
 }
 
