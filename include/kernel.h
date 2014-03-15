@@ -4,4 +4,7 @@
 extern void do_exit(void) __attribute__((noreturn));
 extern void stop_kernel(void);
 
+void pre_suspend(void);
+void post_suspend(void);
+
 #endif /* _KERNEL_H_ */

@@ -122,6 +122,16 @@ arch_init(start_info_t *si)
 }
 
 void
+arch_pre_suspend(void)
+{
+}
+
+void
+arch_post_suspend(int canceled)
+{
+}
+
+void
 arch_fini(void)
 {
 #ifdef __i386__

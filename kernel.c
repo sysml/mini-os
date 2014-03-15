@@ -131,7 +131,7 @@ void start_kernel(start_info_t *si)
 
 #ifdef CONFIG_XENBUS
     /* Init shutdown thread */
-    init_shutdown();
+    init_shutdown(si);
 #endif
 
     /* Call (possibly overridden) app_main() */
@@ -167,6 +167,16 @@ void stop_kernel(void)
 
     /* Reset arch details */
     arch_fini();
+}
+
+void pre_suspend(void)
+{
+    local_irq_disable();
+}
+
+void post_suspend(void)
+{
+    local_irq_enable();
 }
 
 /*
