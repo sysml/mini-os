@@ -63,7 +63,8 @@ struct netfront_dev {
     size_t rlen;
 #endif
 
-    void (*netif_rx)(unsigned char* data, int len);
+    void (*netif_rx)(unsigned char* data, int len, void *arg);
+    void *netif_rx_arg;
 };
 
 struct netfront_dev_list {
@@ -91,7 +92,7 @@ static inline unsigned short get_id_from_freelist(unsigned short* freelist)
     return id;
 }
 
-__attribute__((weak)) void netif_rx(unsigned char* data,int len)
+__attribute__((weak)) void netif_rx(unsigned char* data,int len,void* arg)
 {
     printk("%d bytes incoming at %p\n",len,data);
 }
@@ -154,7 +155,7 @@ moretodo:
 		some = 1;
 	    } else
 #endif
-		dev->netif_rx(page+rx->offset,rx->status);
+		dev->netif_rx(page+rx->offset,rx->status, dev->netif_rx_arg);
         }
     }
     dev->rx.rsp_cons=cons;
@@ -297,11 +298,18 @@ static void free_netfront(struct netfront_dev *dev)
     for(i=0;i<NET_TX_RING_SIZE;i++)
 	if (dev->tx_buffers[i].page)
 	    free_page(dev->tx_buffers[i].page);
-
-    dev->netif_rx = thenetif_rx;
 }
 
-struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned char* data, int len), unsigned char rawmac[6], char **ip)
+void netfront_set_rx_handler(struct netfront_dev *dev, void (*thenetif_rx)(unsigned char* data, int len, void *arg), void *arg)
+{
+    if (dev->netif_rx && dev->netif_rx != netif_rx)
+        printk("Replacing netif_rx handler for dev %s\n", dev->nodename);
+
+    dev->netif_rx = thenetif_rx;
+    dev->netif_rx_arg = arg;
+}
+
+struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned char* data, int len, void *arg), unsigned char rawmac[6], char **ip)
 {
     char nodename[256];
     struct netfront_dev *dev;
@@ -333,6 +341,7 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
     dev->fd = -1;
 #endif
     dev->netif_rx = thenetif_rx;
+    dev->netif_rx_arg = NULL;
 
     ldev = malloc(sizeof(struct netfront_dev_list));
     memset(ldev, 0, sizeof(struct netfront_dev_list));

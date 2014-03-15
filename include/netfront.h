@@ -3,7 +3,8 @@
 #include <lwip/netif.h>
 #endif
 struct netfront_dev;
-struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned char *data, int len), unsigned char rawmac[6], char **ip);
+void netfront_set_rx_handler(struct netfront_dev *dev, void (*thenetif_rx)(unsigned char* data, int len, void *arg), void *arg);
+struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned char *data, int len, void *arg), unsigned char rawmac[6], char **ip);
 void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len);
 void shutdown_netfront(struct netfront_dev *dev);
 void suspend_netfront(void);
