@@ -206,6 +206,11 @@ void fini_events(void)
 #endif
 }
 
+void suspend_events(void)
+{
+    unbind_all_ports();
+}
+
 void default_handler(evtchn_port_t port, struct pt_regs *regs, void *ignore)
 {
     printk("[Port %d] - event received\n", port);

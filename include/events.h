@@ -48,5 +48,6 @@ static inline int notify_remote_via_evtchn(evtchn_port_t port)
 }
 
 void fini_events(void);
+void suspend_events(void);
 
 #endif /* _EVENTS_H_ */

@@ -180,6 +180,8 @@ void pre_suspend(void)
     suspend_time();
 
     suspend_console();
+
+    suspend_events();
 }
 
 void post_suspend(void)
