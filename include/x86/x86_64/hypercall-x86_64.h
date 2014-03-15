@@ -303,8 +303,11 @@ static inline int
 HYPERVISOR_suspend(
 	unsigned long srec)
 {
+	struct sched_shutdown r;
+	r.reason = SHUTDOWN_suspend;
+
 	return _hypercall3(int, sched_op, SCHEDOP_shutdown,
-			   SHUTDOWN_suspend, srec);
+			   &r, srec);
 }
 
 static inline int
