@@ -36,6 +36,11 @@
 shared_info_t *HYPERVISOR_shared_info;
 
 /*
+ * This pointer holds a reference to the copy of the start_info struct.
+ */
+static start_info_t *start_info_ptr;
+
+/*
  * This structure contains start-of-day info, such as pagetable base pointer,
  * address of the shared_info structure, and things like that.
  */
@@ -74,6 +79,19 @@ shared_info_t *map_shared_info(unsigned long pa)
 	return (shared_info_t *)shared_info;
 }
 
+static
+void unmap_shared_info(void)
+{
+    int rc;
+
+    if ( (rc = HYPERVISOR_update_va_mapping((unsigned long)HYPERVISOR_shared_info,
+            __pte((virt_to_mfn(shared_info)<<L1_PAGETABLE_SHIFT)| L1_PROT), UVMF_INVLPG)) )
+    {
+        printk("Failed to unmap shared_info page!! rc=%d\n", rc);
+        do_exit();
+    }
+}
+
 static inline void fpu_init(void) {
 	asm volatile("fninit");
 }
@@ -100,6 +118,7 @@ arch_init(start_info_t *si)
 	/* WARN: don't do printk before here, it uses information from
 	   shared_info. Use xprintk instead. */
 	memcpy(&start_info, si, sizeof(*si));
+	start_info_ptr = si;
 
 	/* set up minimal memory infos */
 	phys_to_machine_mapping = (unsigned long *)start_info.mfn_list;
@@ -124,11 +143,31 @@ arch_init(start_info_t *si)
 void
 arch_pre_suspend(void)
 {
+    arch_mm_pre_suspend();
+
+    unmap_shared_info();
+
+    /* Replace xenstore and console pfns with the correspondent mfns */
+    start_info_ptr->store_mfn =
+        machine_to_phys_mapping[start_info_ptr->store_mfn];
+    start_info_ptr->console.domU.mfn =
+        machine_to_phys_mapping[start_info_ptr->console.domU.mfn];
+
 }
 
 void
 arch_post_suspend(int canceled)
 {
+    if (canceled) {
+        start_info_ptr->store_mfn = pfn_to_mfn(start_info_ptr->store_mfn);
+        start_info_ptr->console.domU.mfn = pfn_to_mfn(start_info_ptr->console.domU.mfn);
+    } else {
+        memcpy(&start_info, start_info_ptr, sizeof(start_info_t));
+    }
+
+    HYPERVISOR_shared_info = map_shared_info(start_info_ptr->shared_info);
+
+    arch_mm_post_suspend();
 }
 
 void
