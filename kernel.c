@@ -171,6 +171,10 @@ void stop_kernel(void)
 
 void pre_suspend(void)
 {
+#ifdef CONFIG_NETFRONT
+    suspend_netfront();
+#endif
+
     suspend_xenbus();
 
     local_irq_disable();
@@ -195,6 +199,10 @@ void post_suspend(void)
     local_irq_enable();
 
     resume_xenbus();
+
+#ifdef CONFIG_NETFRONT
+    resume_netfront();
+#endif
 }
 
 /*

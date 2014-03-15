@@ -66,7 +66,17 @@ struct netfront_dev {
     void (*netif_rx)(unsigned char* data, int len);
 };
 
+struct netfront_dev_list {
+    struct netfront_dev *dev;
+
+    struct netfront_dev_list *next;
+};
+
+static struct netfront_dev_list *dev_list = NULL;
+
 void init_rx_buffers(struct netfront_dev *dev);
+static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned char rawmac[6], char **ip);
+static void _shutdown_netfront(struct netfront_dev *dev);
 
 static inline void add_id_to_freelist(unsigned int id,unsigned short* freelist)
 {
@@ -288,11 +298,68 @@ static void free_netfront(struct netfront_dev *dev)
 	if (dev->tx_buffers[i].page)
 	    free_page(dev->tx_buffers[i].page);
 
-    free(dev->nodename);
-    free(dev);
+    dev->netif_rx = thenetif_rx;
 }
 
 struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned char* data, int len), unsigned char rawmac[6], char **ip)
+{
+    char nodename[256];
+    struct netfront_dev *dev;
+    struct netfront_dev_list *ldev = NULL;
+    struct netfront_dev_list *list = NULL;
+    static int netfrontends = 0;
+
+    if (!_nodename)
+        snprintf(nodename, sizeof(nodename), "device/vif/%d", netfrontends);
+    else {
+        strncpy(nodename, _nodename, sizeof(nodename) - 1);
+        nodename[sizeof(nodename) - 1] = 0;
+    }
+
+    /* Check if the device is already initialized */
+    for ( list = dev_list; list != NULL; list = list->next) {
+        if (strcmp(nodename, list->dev->nodename) == 0) {
+            return list->dev;
+        }
+    }
+
+    if (!thenetif_rx)
+	thenetif_rx = netif_rx;
+
+    dev = malloc(sizeof(*dev));
+    memset(dev, 0, sizeof(*dev));
+    dev->nodename = strdup(nodename);
+#ifdef HAVE_LIBC
+    dev->fd = -1;
+#endif
+    dev->netif_rx = thenetif_rx;
+
+    ldev = malloc(sizeof(struct netfront_dev_list));
+    memset(ldev, 0, sizeof(struct netfront_dev_list));
+
+    if (_init_netfront(dev, rawmac, ip)) {
+        ldev->dev = dev;
+        ldev->next = NULL;
+
+        if (!dev_list) {
+            dev_list = ldev;
+        } else {
+            for ( list = dev_list->next; list != NULL; list = list->next);
+            list->next = ldev;
+        }
+
+        netfrontends++;
+    } else {
+        free(dev->nodename);
+        free(dev);
+        free(ldev);
+        dev = NULL;
+    }
+
+    return dev;
+}
+
+static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned char rawmac[6], char **ip)
 {
     xenbus_transaction_t xbt;
     char* err;
@@ -302,30 +369,9 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
     int retry=0;
     int i;
     char* msg = NULL;
-    char nodename[256];
     char path[256];
-    struct netfront_dev *dev;
-    static int netfrontends = 0;
 
-    if (!_nodename)
-        snprintf(nodename, sizeof(nodename), "device/vif/%d", netfrontends);
-    else {
-        strncpy(nodename, _nodename, sizeof(nodename) - 1);
-        nodename[sizeof(nodename) - 1] = 0;
-    }
-    netfrontends++;
-
-    if (!thenetif_rx)
-	thenetif_rx = netif_rx;
-
-    printk("************************ NETFRONT for %s **********\n\n\n", nodename);
-
-    dev = malloc(sizeof(*dev));
-    memset(dev, 0, sizeof(*dev));
-    dev->nodename = strdup(nodename);
-#ifdef HAVE_LIBC
-    dev->fd = -1;
-#endif
+    printk("************************ NETFRONT for %s **********\n\n\n", dev->nodename);
 
     printk("net TX ring size %d\n", NET_TX_RING_SIZE);
     printk("net RX ring size %d\n", NET_RX_RING_SIZE);
@@ -342,10 +388,10 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
         dev->rx_buffers[i].page = (char*)alloc_page();
     }
 
-    snprintf(path, sizeof(path), "%s/backend-id", nodename);
+    snprintf(path, sizeof(path), "%s/backend-id", dev->nodename);
     dev->dom = xenbus_read_integer(path);
 #ifdef HAVE_LIBC
-    if (thenetif_rx == NETIF_SELECT_RX)
+    if (dev->netif_rx == NETIF_SELECT_RX)
         evtchn_alloc_unbound(dev->dom, netfront_select_handler, dev, &dev->evtchn);
     else
 #endif
@@ -367,8 +413,6 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
 
     init_rx_buffers(dev);
 
-    dev->netif_rx = thenetif_rx;
-
     dev->events = NULL;
 
 again:
@@ -378,33 +422,33 @@ again:
         free(err);
     }
 
-    err = xenbus_printf(xbt, nodename, "tx-ring-ref","%u",
+    err = xenbus_printf(xbt, dev->nodename, "tx-ring-ref","%u",
                 dev->tx_ring_ref);
     if (err) {
         message = "writing tx ring-ref";
         goto abort_transaction;
     }
-    err = xenbus_printf(xbt, nodename, "rx-ring-ref","%u",
+    err = xenbus_printf(xbt, dev->nodename, "rx-ring-ref","%u",
                 dev->rx_ring_ref);
     if (err) {
         message = "writing rx ring-ref";
         goto abort_transaction;
     }
-    err = xenbus_printf(xbt, nodename,
+    err = xenbus_printf(xbt, dev->nodename,
                 "event-channel", "%u", dev->evtchn);
     if (err) {
         message = "writing event-channel";
         goto abort_transaction;
     }
 
-    err = xenbus_printf(xbt, nodename, "request-rx-copy", "%u", 1);
+    err = xenbus_printf(xbt, dev->nodename, "request-rx-copy", "%u", 1);
 
     if (err) {
         message = "writing request-rx-copy";
         goto abort_transaction;
     }
 
-    snprintf(path, sizeof(path), "%s/state", nodename);
+    snprintf(path, sizeof(path), "%s/state", dev->nodename);
     err = xenbus_switch_state(xbt, path, XenbusStateConnected);
     if (err) {
         message = "switching state";
@@ -428,9 +472,9 @@ abort_transaction:
 
 done:
 
-    snprintf(path, sizeof(path), "%s/backend", nodename);
+    snprintf(path, sizeof(path), "%s/backend", dev->nodename);
     msg = xenbus_read(XBT_NIL, path, &dev->backend);
-    snprintf(path, sizeof(path), "%s/mac", nodename);
+    snprintf(path, sizeof(path), "%s/mac", dev->nodename);
     msg = xenbus_read(XBT_NIL, path, &dev->mac);
 
     if ((dev->backend == NULL) || (dev->mac == NULL)) {
@@ -506,6 +550,37 @@ int netfront_tap_open(char *nodename) {
 
 void shutdown_netfront(struct netfront_dev *dev)
 {
+    struct netfront_dev_list *list = NULL;
+    struct netfront_dev_list *to_del = NULL;
+
+    /* Check this is a valid device */
+    for ( list = dev_list; list != NULL; list = list->next ) {
+        if (list->dev == dev)
+            break;
+    }
+
+    if (!list) {
+        printk("Trying to shutdown an invalid netfront device (%p)\n", dev);
+        return;
+    }
+
+    _shutdown_netfront(dev);
+    free(dev->nodename);
+    free(dev);
+
+    to_del = list;
+    if (to_del == dev_list) {
+        free(to_del);
+        dev_list = NULL;
+    } else {
+        for ( list = dev_list; list->next != to_del; list = list->next );
+        list->next = to_del->next;
+        free(to_del);
+    }
+}
+
+static void _shutdown_netfront(struct netfront_dev *dev)
+{
     char* err = NULL, *err2;
     XenbusState state;
 
@@ -569,6 +644,23 @@ close:
         free_netfront(dev);
 }
 
+void suspend_netfront(void)
+{
+    struct netfront_dev_list *list;
+
+    for (list = dev_list; list != NULL; list = list->next) {
+        _shutdown_netfront(list->dev);
+    }
+}
+
+void resume_netfront(void)
+{
+    struct netfront_dev_list *list;
+
+    for (list = dev_list; list != NULL; list = list->next) {
+        _init_netfront(list->dev, NULL, NULL);
+    }
+}
 
 void init_rx_buffers(struct netfront_dev *dev)
 {

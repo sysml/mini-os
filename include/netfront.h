@@ -6,6 +6,8 @@ struct netfront_dev;
 struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned char *data, int len), unsigned char rawmac[6], char **ip);
 void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len);
 void shutdown_netfront(struct netfront_dev *dev);
+void suspend_netfront(void);
+void resume_netfront(void);
 #ifdef HAVE_LIBC
 int netfront_tap_open(char *nodename);
 ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data, size_t len);
