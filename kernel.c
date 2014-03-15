@@ -176,10 +176,14 @@ void pre_suspend(void)
     local_irq_disable();
 
     suspend_gnttab();
+
+    suspend_time();
 }
 
 void post_suspend(void)
 {
+    resume_time();
+
     resume_gnttab();
 
     local_irq_enable();

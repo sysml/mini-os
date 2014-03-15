@@ -236,3 +236,16 @@ void fini_time(void)
     HYPERVISOR_set_timer_op(0);
     unbind_evtchn(port);
 }
+
+void suspend_time(void)
+{
+    /* Clear any pending timer */
+    HYPERVISOR_set_timer_op(0);
+    unbind_evtchn(port);
+}
+
+void resume_time(void)
+{
+    port = bind_virq(VIRQ_TIMER, &timer_handler, NULL);
+    unmask_evtchn(port);
+}
