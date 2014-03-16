@@ -53,6 +53,10 @@ struct netfront_dev {
     char *nodename;
     char *backend;
     char *mac;
+#ifdef CONFIG_NETMAP
+    int netmap;
+    void *na;
+#endif
 
     xenbus_event_queue events;
 
@@ -77,10 +81,15 @@ struct netfront_dev_list {
     struct netfront_dev_list *next;
 };
 
+#ifdef CONFIG_NETMAP
+#include <mini-os/netfront_netmap.h>
+#endif
+
 static struct netfront_dev_list *dev_list = NULL;
 
 void init_rx_buffers(struct netfront_dev *dev);
-static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned char rawmac[6], char **ip);
+static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
+				unsigned char rawmac[6], char **ip);
 static void _shutdown_netfront(struct netfront_dev *dev);
 
 static inline void add_id_to_freelist(unsigned int id,unsigned short* freelist)
@@ -114,6 +123,12 @@ void network_rx(struct netfront_dev *dev)
     struct netif_rx_response *rx;
     int nr_consumed, some, more, i, notify;
 
+#ifdef CONFIG_NETMAP
+    if (dev->netmap) {
+        netmap_netfront_rx(dev);
+        return;
+    }
+#endif
 
 moretodo:
     rp = dev->rx.sring->rsp_prod;
@@ -278,13 +293,16 @@ static void free_netfront(struct netfront_dev *dev)
 {
     int i;
 
+    free(dev->mac);
+    free(dev->backend);
+#ifdef CONFIG_NETMAP
+	if (dev->netmap)
+			return;
+#endif
     for(i=0;i<NET_TX_RING_SIZE;i++)
 	down(&dev->tx_sem);
 
     mask_evtchn(dev->evtchn);
-
-    free(dev->mac);
-    free(dev->backend);
 
     gnttab_end_access(dev->rx_ring_ref);
     gnttab_end_access(dev->tx_ring_ref);
@@ -396,7 +414,7 @@ err:
 static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned char rawmac[6], char **ip)
 {
     xenbus_transaction_t xbt;
-    char* err;
+    char* err = NULL;
     char* message=NULL;
     struct netif_tx_sring *txs;
     struct netif_rx_sring *rxs;
@@ -404,6 +422,28 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned ch
     int i;
     char* msg = NULL;
     char path[256];
+
+    snprintf(path, sizeof(path), "%s/backend-id", dev->nodename);
+    dev->dom = xenbus_read_integer(path);
+
+    snprintf(path, sizeof(path), "%s/backend", dev->nodename);
+    msg = xenbus_read(XBT_NIL, path, &dev->backend);
+    snprintf(path, sizeof(path), "%s/mac", dev->nodename);
+    msg = xenbus_read(XBT_NIL, path, &dev->mac);
+    if ((dev->backend == NULL) || (dev->mac == NULL)) {
+        printk("%s: backend/mac failed\n", __func__);
+        goto error;
+    }
+
+#ifdef CONFIG_NETMAP
+    snprintf(path, sizeof(path), "%s/feature-netmap", dev->backend);
+    dev->netmap = xenbus_read_integer(path);
+
+    if (dev->netmap) {
+            dev->na = init_netfront_netmap(dev, dev->netif_rx);
+            goto skip;
+    }
+#endif
 
     printk("************************ NETFRONT for %s **********\n\n\n", dev->nodename);
 
@@ -422,8 +462,6 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned ch
         dev->rx_buffers[i].page = (char*)alloc_page();
     }
 
-    snprintf(path, sizeof(path), "%s/backend-id", dev->nodename);
-    dev->dom = xenbus_read_integer(path);
 #ifdef HAVE_LIBC
     if (dev->netif_rx == NETIF_SELECT_RX)
         evtchn_alloc_unbound(dev->dom, netfront_select_handler, dev, &dev->evtchn);
@@ -506,12 +544,10 @@ abort_transaction:
 
 done:
 
-    snprintf(path, sizeof(path), "%s/backend", dev->nodename);
-    msg = xenbus_read(XBT_NIL, path, &dev->backend);
     snprintf(path, sizeof(path), "%s/mac", dev->nodename);
     msg = xenbus_read(XBT_NIL, path, &dev->mac);
 
-    if ((dev->backend == NULL) || (dev->mac == NULL)) {
+    if (dev->mac == NULL) {
         printk("%s: backend/mac failed\n", __func__);
         goto error;
     }
@@ -545,6 +581,12 @@ done:
     printk("**************************\n");
 
     unmask_evtchn(dev->evtchn);
+
+skip:
+#ifdef CONFIG_NETMAP
+    if (dev->netmap)
+        connect_netfront(dev);
+#endif
 
         /* Special conversion specifier 'hh' needed for __ia64__. Without
            this mini-os panics with 'Unaligned reference'. */
@@ -620,7 +662,6 @@ static void _shutdown_netfront(struct netfront_dev *dev)
 {
     char* err = NULL, *err2;
     XenbusState state;
-
     char path[strlen(dev->backend) + strlen("/state") + 1];
     char nodename[strlen(dev->nodename) + strlen("/request-rx-copy") + 1];
 
@@ -628,6 +669,11 @@ static void _shutdown_netfront(struct netfront_dev *dev)
 
     snprintf(path, sizeof(path), "%s/state", dev->backend);
     snprintf(nodename, sizeof(nodename), "%s/state", dev->nodename);
+#ifdef CONFIG_NETMAP
+    if (dev->netmap) {
+            shutdown_netfront_netmap(dev);
+    }
+#endif
 
     if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateClosing)) != NULL) {
         printk("shutdown_netfront: error changing state to %d: %s\n",
@@ -739,6 +785,12 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len)
     unsigned short id;
     struct net_buffer* buf;
     void* page;
+#ifdef CONFIG_NETMAP
+    if (dev->netmap) {
+        netmap_netfront_xmit(dev->na, data, len);
+        return;
+    }
+#endif
 
     BUG_ON(len > PAGE_SIZE);
 
