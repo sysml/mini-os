@@ -27,8 +27,10 @@
 #include <netfront.h>
 #include <blkfront.h>
 #include <fbfront.h>
+#ifdef CONFIG_TPMFRONT
 #include <tpmfront.h>
 #include <tpm_tis.h>
+#endif
 #include <xenbus.h>
 #include <xenstore.h>
 #include <poll.h>
