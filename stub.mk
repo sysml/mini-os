@@ -2,14 +2,16 @@
 # Essential definitions
 ################################################################################
 ifndef XEN_ROOT
-$(error "Modify XEN_ROOT to match your dir structure")
+$(error "Please define XEN_ROOT")
 endif
 
-ifndef TOOLCHAIN_ROOT
-$(error "Modify TOOLCHAIN_ROOT to match your dir structure")
+ifndef LWIP_ROOT
+$(error "Please define LWIP_ROOT")
 endif
 
-GCC_VERSION	:= 4.5.0 # FIXME: Remove
+ifndef NEWLIB_ROOT
+$(error "Please define NEWLIB_ROOT")
+endif
 
 verbose		?= n
 debug		?= n
@@ -40,17 +42,8 @@ endif
 
 
 ################################################################################
-# Toolchain
-################################################################################
-CROSS_ROOT		 = cross-root-$(GNU_TARGET_ARCH)
-CROSS_TOOLCHAIN	 = $(TOOLCHAIN_ROOT)/$(CROSS_ROOT)
-PATH			:= $(PATH):$(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/bin
-export PATH
-
-
-#################################################################
 # Base commands and functions
-#################################################################
+################################################################################
 LN			 = ln -sf
 MKDIR		 = mkdir -p
 MV			 = mv -f
@@ -58,14 +51,8 @@ RM			 = rm -f
 RMDIR		 = rm -rf
 TOUCH		 = touch
 
-CC			 = $(GNU_TARGET_ARCH)-xen-elf-gcc
-CXX			 = $(GNU_TARGET_ARCH)-xen-elf-g++
-CPP			 = $(GNU_TARGET_ARCH)-xen-elf-cpp
-LD			 = $(GNU_TARGET_ARCH)-xen-elf-ld
-AR			 = $(GNU_TARGET_ARCH)-xen-elf-ar
-AS			 = $(GNU_TARGET_ARCH)-xen-elf-as
-STRIP		 = $(GNU_TARGET_ARCH)-xen-elf-strip
-OBJCOPY		 = $(GNU_TARGET_ARCH)-xen-elf-objcopy
+STRIP		 = strip
+OBJCOPY		 = objcopy
 
 CXXCOMPILE	 = $(CXX) $(CDEFINES) $(CINCLUDES) $(CPPFLAGS) $(CXXFLAGS)
 CXXLD		 = $(CXX)
@@ -75,31 +62,29 @@ ASCOMPILE	 = $(CC) $(ASDEFINES) $(CDEFINES) $(CINCLUDES) $(ASFLAGS)
 CCLD		 = $(CC)
 LINK		 = $(CCLD) $(CFLAGS) $(LDFLAGS) -o $@
 
-CROSS_MAKE	 = $(MAKE) DESTDIR=
-
 ifneq ($(verbose),y)
-ccompile				= @/bin/echo ' ' $(2) $< && $(COMPILE) $(DEPCFLAGS) $(1)
-ccompile_nodep			= @/bin/echo ' ' $(2) $< && $(COMPILE) $(1)
-ascompile				= @/bin/echo ' ' $(2) $< && $(ASCOMPILE) $(DEPCFLAGS) $(1)
-ascompile_nodep			= @/bin/echo ' ' $(2) $< && $(ASCOMPILE) $(1)
-cxxcompile				= @/bin/echo ' ' $(2) $< && $(CXXCOMPILE) $(DEPCFLAGS) $(1)
-cxxcompile_nodep		= @/bin/echo ' ' $(2) $< && $(CXXCOMPILE) $(1)
-cxxlink					= @/bin/echo ' ' $(2) $< && $(CXXLINK) $(1)
-archive					= @/bin/echo ' ' $(2) $@ && $(AR) cr $(1)
-x_verbose_cmd			= $(if $(2),/bin/echo ' ' $(2) $(3) &&,) $(1) $(3)
-verbose_cmd				= @$(x_verbose_cmd)
-CROSS_MAKE				+= --silent
+ccompile				 = @/bin/echo ' ' $(2) $< && $(COMPILE) $(DEPCFLAGS) $(1)
+ccompile_nodep			 = @/bin/echo ' ' $(2) $< && $(COMPILE) $(1)
+ascompile				 = @/bin/echo ' ' $(2) $< && $(ASCOMPILE) $(DEPCFLAGS) $(1)
+ascompile_nodep			 = @/bin/echo ' ' $(2) $< && $(ASCOMPILE) $(1)
+cxxcompile				 = @/bin/echo ' ' $(2) $< && $(CXXCOMPILE) $(DEPCFLAGS) $(1)
+cxxcompile_nodep		 = @/bin/echo ' ' $(2) $< && $(CXXCOMPILE) $(1)
+cxxlink					 = @/bin/echo ' ' $(2) $< && $(CXXLINK) $(1)
+archive					 = @/bin/echo ' ' $(2) $@ && $(AR) cr $(1)
+x_verbose_cmd			 = $(if $(2),/bin/echo ' ' $(2) $(3) &&,) $(1) $(3)
+verbose_cmd				 = @$(x_verbose_cmd)
+MAKE					:= $(MAKE) --silent
 else
-ccompile				= $(COMPILE) $(DEPCFLAGS) $(1)
-ccompile_nodep			= $(COMPILE) $(1)
-ascompile				= $(ASCOMPILE) $(DEPCFLAGS) $(1)
-ascompile_nodep			= $(ASCOMPILE) $(1)
-cxxcompile				= $(CXXCOMPILE) $(DEPCFLAGS) $(1)
-cxxcompile_nodep		= $(CXXCOMPILE) $(1)
-cxxlink					= $(CXXLINK) $(1)
-archive					= $(AR) crv $(1)
-x_verbose_cmd			= $(1) $(3)
-verbose_cmd				= $(1) $(3)
+ccompile				 = $(COMPILE) $(DEPCFLAGS) $(1)
+ccompile_nodep			 = $(COMPILE) $(1)
+ascompile				 = $(ASCOMPILE) $(DEPCFLAGS) $(1)
+ascompile_nodep			 = $(ASCOMPILE) $(1)
+cxxcompile				 = $(CXXCOMPILE) $(DEPCFLAGS) $(1)
+cxxcompile_nodep		 = $(CXXCOMPILE) $(1)
+cxxlink					 = $(CXXLINK) $(1)
+archive					 = $(AR) crv $(1)
+x_verbose_cmd			 = $(1) $(3)
+verbose_cmd				 = $(1) $(3)
 endif
 
 define add_cc_buildtarget
@@ -209,8 +194,8 @@ endif
 
 MINIOS_OBJS			 = $(addprefix $(MINIOS_OBJ_DIR)/,$(notdir $(MINIOS_OBJS0-y)))
 MINIOS_DEPS			 = $(patsubst %.o,%.d,$(MINIOS_OBJS))
-MINIOS_LDLIBS		+= -L$(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/lib -whole-archive
-MINIOS_LDLIBS		+= -lxenguest -lxenctrl -no-whole-archive  -lpci -lz -lm -lc
+MINIOS_LDLIBS		+= -L$(NEWLIB_ROOT)/lib -whole-archive
+MINIOS_LDLIBS		+= -no-whole-archive -lm -lc
 MINIOS_LDS			:= $(MINIOS_ROOT)/app.lds
 
 CDEFINES			+= -D__MINIOS__ -D__INSIDE_MINIOS__
@@ -310,7 +295,7 @@ distclean-minios:
 # LWIP
 ################################################################################
 ifeq ($(CONFIG_LWIP),y)
-MINIOS_LWIP_SRC_DIR	 = $(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/include/lwip-$(XEN_TARGET_ARCH)/src
+MINIOS_LWIP_SRC_DIR	 = $(LWIP_ROOT)/src/lwip
 MINIOS_LWIP_SUBDIRS	 = core core/snmp core/ipv4 netif netif/ppp api
 MINIOS_LWIP_OBJ_DIR	 = $(MINIOS_OBJ_DIR)/lwip
 MINIOS_LWIP_OBJS0 :=	\
@@ -370,8 +355,8 @@ MINIOS_LWIP_OBJS	 = $(addprefix $(MINIOS_LWIP_OBJ_DIR)/,$(MINIOS_LWIP_OBJS0))
 MINIOS_LWIP_DEPS	 = $(patsubst %.o,%.d,$(MINIOS_LWIP_OBJS))
 MINIOS_LWIP_LIB		 = $(MINIOS_LWIP_OBJ_DIR)/liblwip.a
 
-CINCLUDES			+= -isystem $(MINIOS_LWIP_SRC_DIR)/include
-CINCLUDES			+= -isystem $(MINIOS_LWIP_SRC_DIR)/include/ipv4
+CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip
+CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip/ipv4
 CDEFINES			+= -DHAVE_LWIP
 BUILD_DIRS			+= $(MINIOS_LWIP_OBJ_DIR)
 DEPS				+= $(MINIOS_LWIP_DEPS)
@@ -412,26 +397,28 @@ endif
 ################################################################################
 # General build rules
 ################################################################################
-CFLAGS			+= -fno-builtin -Wall -Wredundant-decls -Wno-format -Wno-redundant-decls
-CFLAGS			+= -fno-stack-protector -fgnu89-inline
-CFLAGS			+= -Wstrict-prototypes -Wnested-externs -Wpointer-arith -Winline
+GCC_INSTALL		= $(shell LANG=C gcc -print-search-dirs | sed -n -e 's/install: \(.*\)/\1/p')
 
-CXXFLAGS		+= -fno-builtin -Wall -Wredundant-decls -Wno-format -Wno-redundant-decls
-CXXFLAGS		+= -fno-stack-protector -Wpointer-arith -fno-exceptions
+CFLAGS			+= -U __linux__ -U __FreeBSD__ -U __sun__
+CFLAGS			+= -nostdinc
+CFLAGS			+= -isystem $(GCC_INSTALL)include
+CFLAGS			+= -Wall -Wno-format -Wno-redundant-decls -Wno-undef
+CFLAGS			+= -fno-builtin -fno-stack-protector -fgnu89-inline
+
+CXXFLAGS		+= -Wall -Wno-format -Wno-redundant-decls -Wno-strict-aliasing -Wno-undef -Wno-pointer-arith
+CXXFLAGS		+= -fno-exceptions -fno-rtti -fpermissive -fno-builtin -fno-stack-protector
 
 CDEFINES		+= -DHAVE_LIBC
 CDEFINES		+= -D__XEN_INTERFACE_VERSION__=$(XEN_INTERFACE_VERSION)
 
 CINCLUDES		+= -isystem $(XEN_ROOT)/tools/xenstore
-CINCLUDES		+= -isystem $(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/include
+CINCLUDES		+= -isystem $(NEWLIB_ROOT)/include
 
 ASDEFINES		+= -D__ASSEMBLY__
 
-LDLIBS			+= -L$(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/$(GNU_TARGET_ARCH)-xen-elf/lib -lstdc++
-LDLIBS			+= -L$(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/lib -lc -lm
-LDLIBS			+= -L$(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/lib/gcc/$(GNU_TARGET_ARCH)-xen-elf/$(GCC_VERSION) -lgcc
+LDFLAGS			+= -nostdlib
 
-LDFLAGS			+= -z muldefs
+LDLIBS			+= -L$(NEWLIB_ROOT)/lib -lc -lm
 
 DEPCFLAGS			:= -MD -MP
 STUB_GLOBAL_PREFIX	?= xenos_
@@ -461,16 +448,16 @@ ifeq ($(debug),y)
 CFLAGS			+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls
 CXXFLAGS		+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls
 else
-CFLAGS			+= -O3 -fomit-frame-pointer
-CXXFLAGS		+= -O3 -fomit-frame-pointer
+CFLAGS			+= -O3 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
+CXXFLAGS		+= -O3 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
 endif
 
 -include $(DEPS)
 
 
-#######################################################################
+################################################################################
 # Linking external apps
-######################################################################
+################################################################################
 STUBDOM_NAME		?= stub
 
 STUB_APP_SRC_DIR	?= $(STUBDOM_ROOT)
@@ -522,7 +509,7 @@ $(STUB_APP_IMG).o: $(STUB_APP_IMG)_.o
 $(STUB_APP_IMG): $(STUB_APP_IMG).o
 	$(call verbose_cmd,$(LD) $(LDFLAGS) -T $(MINIOS_ARCH_LDS) $@.o -o,'LD ',$@)
 ifneq ($(debug),y)
-	$(call verbose_cmd,strip -s,'STR',$@)
+	$(call verbose_cmd,$(STRIP) -s,'STR',$@)
 endif
 
 $(STUB_APP_IMG).gz: $(STUB_APP_IMG)
@@ -531,7 +518,7 @@ $(STUB_APP_IMG).gz: $(STUB_APP_IMG)
 
 .PHONY: stub clean-stub distclean-stub
 stub: $(STUB_BANNER)
-	+$(call verbose_cmd,$(CROSS_MAKE),'MK ',$(STUB_APP_IMG).gz)
+	+$(call verbose_cmd,$(MAKE) DESTDIR= ,'MK ',$(STUB_APP_IMG).gz)
 	@echo "================================================================================"
 	@echo
 	@echo " Your $(STUBDOM_NAME) build is complete..."
@@ -555,9 +542,9 @@ banner:
 	@#
 
 
-#######################################################################
+################################################################################
 # Others
-######################################################################
+################################################################################
 .PHONY: all
 all: stub
 
