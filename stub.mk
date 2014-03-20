@@ -158,6 +158,8 @@ MINIOS_OBJS0-y		:=	\
 	hypervisor.o		\
 	kernel.o			\
 	lock.o				\
+	lwip-arch.o			\
+	lwip-net.o			\
 	main.o				\
 	math.o				\
 	mm.o				\
@@ -311,8 +313,6 @@ MINIOS_LWIP_SRC_DIR	 = $(CROSS_TOOLCHAIN)/$(GNU_TARGET_ARCH)-xen-elf/include/lwi
 MINIOS_LWIP_SUBDIRS	 = core core/snmp core/ipv4 netif netif/ppp api
 MINIOS_LWIP_OBJ_DIR	 = $(MINIOS_OBJ_DIR)/lwip
 MINIOS_LWIP_OBJS0 :=	\
-	lwip-arch.o			\
-	lwip-net.o			\
 	msg_out.o			\
 	asn1_dec.o			\
 	mib_structs.o		\
