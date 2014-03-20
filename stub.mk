@@ -376,7 +376,7 @@ BUILD_DIRS			+= $(MINIOS_LWIP_OBJ_DIR)
 DEPS				+= $(MINIOS_LWIP_DEPS)
 
 # Build rules for lwip lib
-$(foreach buildtarget, $(MINIOS_ROOT) \
+$(foreach buildtarget, $(MINIOS_LWIP_SRC_DIR) \
 	$(addprefix $(MINIOS_LWIP_SRC_DIR)/, $(MINIOS_LWIP_SUBDIRS)), \
 	$(eval $(call add_cc_buildtarget, $(MINIOS_LWIP_OBJ_DIR), $(buildtarget))))
 
