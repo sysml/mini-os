@@ -129,14 +129,13 @@ void network_rx(struct netfront_dev *dev)
         return;
     }
 #endif
-
 moretodo:
     rp = dev->rx.sring->rsp_prod;
     rmb(); /* Ensure we see queued responses up to 'rp'. */
     cons = dev->rx.rsp_cons;
 
     for (nr_consumed = 0, some = 0;
-         (cons != rp) && !some;
+	 (cons != rp);
          nr_consumed++, cons++)
     {
         struct net_buffer* buf;
@@ -159,7 +158,6 @@ moretodo:
 
         buf = &dev->rx_buffers[id];
         page = (unsigned char*)buf->page;
-        gnttab_end_access(buf->gref);
 
         if(rx->status>0)
         {
@@ -171,17 +169,16 @@ moretodo:
 		    len = dev->len;
 		memcpy(dev->data, page+rx->offset, len);
 		dev->rlen = len;
-		some = 1;
 	    } else
 #endif
 		dev->netif_rx(page+rx->offset,rx->status, dev->netif_rx_arg);
+		some = 1;
         }
     }
     dev->rx.rsp_cons=cons;
 
     RING_FINAL_CHECK_FOR_RESPONSES(&dev->rx,more);
     if(more && !some) goto moretodo;
-
     req_prod = dev->rx.req_prod_pvt;
 
     for(i=0; i<nr_consumed; i++)
@@ -189,12 +186,8 @@ moretodo:
         int id = xennet_rxidx(req_prod + i);
         netif_rx_request_t *req = RING_GET_REQUEST(&dev->rx, req_prod + i);
         struct net_buffer* buf = &dev->rx_buffers[id];
-        void* page = buf->page;
 
-        /* We are sure to have free gnttab entries since they got released above */
-        buf->gref = req->gref = 
-            gnttab_grant_access(dev->dom,virt_to_mfn(page),0);
-
+	req->gref = buf->gref;
         req->id = id;
     }
 
@@ -222,7 +215,6 @@ void network_tx_buf_gc(struct netfront_dev *dev)
         for (cons = dev->tx.rsp_cons; cons != prod; cons++) 
         {
             struct netif_tx_response *txrsp;
-            struct net_buffer *buf;
 
             txrsp = RING_GET_RESPONSE(&dev->tx, cons);
             if (txrsp->status == NETIF_RSP_NULL)
@@ -233,9 +225,6 @@ void network_tx_buf_gc(struct netfront_dev *dev)
 
             id  = txrsp->id;
             BUG_ON(id >= NET_TX_RING_SIZE);
-            buf = &dev->tx_buffers[id];
-            gnttab_end_access(buf->gref);
-            buf->gref=GRANT_INVALID_REF;
 
 	    add_id_to_freelist(id,dev->tx_freelist);
 	    up(&dev->tx_sem);
@@ -267,7 +256,6 @@ void netfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
     local_irq_save(flags);
 
     network_tx_buf_gc(dev);
-    network_rx(dev);
 
     local_irq_restore(flags);
 }
@@ -453,7 +441,9 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned ch
     for(i=0;i<NET_TX_RING_SIZE;i++)
     {
 	add_id_to_freelist(i,dev->tx_freelist);
-        dev->tx_buffers[i].page = NULL;
+	dev->tx_buffers[i].page = (char*)alloc_page();
+	dev->tx_buffers[i].gref = gnttab_grant_access(dev->dom,
+						virt_to_mfn(dev->tx_buffers[i].page), 1);
     }
 
     for(i=0;i<NET_RX_RING_SIZE;i++)
@@ -802,16 +792,13 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len)
 
     buf = &dev->tx_buffers[id];
     page = buf->page;
-    if (!page)
-	page = buf->page = (char*) alloc_page();
 
     i = dev->tx.req_prod_pvt;
     tx = RING_GET_REQUEST(&dev->tx, i);
 
     memcpy(page,data,len);
 
-    buf->gref = 
-        tx->gref = gnttab_grant_access(dev->dom,virt_to_mfn(page),1);
+    tx->gref = buf->gref;
 
     tx->offset=0;
     tx->size = len;
