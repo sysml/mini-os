@@ -93,10 +93,7 @@ void kernel_shutdown(int reason)
             reason_str = "poweroff";
             break;
         case SHUTDOWN_reboot:
-            reason_str = "poweroff";
-            break;
-        case SHUTDOWN_suspend:
-            reason_str = "suspend";
+            reason_str = "reboot";
             break;
         case SHUTDOWN_crash:
             reason_str = "crash";
@@ -113,7 +110,7 @@ void kernel_shutdown(int reason)
     stop_kernel();
 
     for ( ;; ) {
-        struct sched_shutdown sched_shutdown = { .reason = SHUTDOWN_poweroff };
+        struct sched_shutdown sched_shutdown = { .reason = reason };
         HYPERVISOR_sched_op(SCHEDOP_shutdown, &sched_shutdown);
     }
 }
