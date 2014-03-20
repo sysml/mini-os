@@ -8,6 +8,7 @@ void network_rx(struct netfront_dev *dev);
 void netfront_set_rx_handler(struct netfront_dev *dev, void (*thenetif_rx)(unsigned char* data, int len, void *arg), void *arg);
 struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned char *data, int len, void *arg), unsigned char rawmac[6], char **ip);
 void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len);
+void netfront_clean_tx_ring(struct netfront_dev *dev);
 void shutdown_netfront(struct netfront_dev *dev);
 void suspend_netfront(void);
 void resume_netfront(void);

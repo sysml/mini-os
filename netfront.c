@@ -757,6 +757,21 @@ void resume_netfront(void)
     }
 }
 
+void netfront_clean_tx_ring(struct netfront_dev *dev)
+{
+    struct semaphore *sem = &(dev->tx_sem);
+
+    unsigned long flags;
+    while (1) {
+        wait_event(sem->wait, sem->count == NET_TX_RING_SIZE);
+        local_irq_save(flags);
+        if (sem->count == NET_TX_RING_SIZE)
+            break;
+        local_irq_restore(flags);
+    }
+    local_irq_restore(flags);
+}
+
 void init_rx_buffers(struct netfront_dev *dev)
 {
     int i, requeue_idx;
