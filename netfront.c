@@ -380,7 +380,7 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
         if (!dev_list) {
             dev_list = ldev;
         } else {
-            for ( list = dev_list->next; list != NULL; list = list->next);
+            for ( list = dev_list; list->next != NULL; list = list->next);
             list->next = ldev;
         }
 
