@@ -1,10 +1,6 @@
 ################################################################################
 # Essential definitions
 ################################################################################
-ifndef XEN_VER
-$(error "Modify XEN_VER to match the version of Xen you are using")
-endif
-
 ifndef XEN_ROOT
 $(error "Modify XEN_ROOT to match your dir structure")
 endif
