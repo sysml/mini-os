@@ -472,9 +472,10 @@ endif
 ######################################################################
 STUBDOM_NAME		?= stub
 
-STUB_APP_OBJS		?= stub.o
 STUB_APP_SRC_DIR	?= $(STUBDOM_ROOT)
 STUB_APP_OBJ_DIR	?= $(STUBDOM_BUILD_DIR)/$(STUBDOM_NAME)
+STUB_APP_OBJS0		?= $(STUBDOM_NAME).o
+STUB_APP_OBJS		?= $(addprefix $(STUB_APP_OBJ_DIR)/,$(STUB_APP_OBJS0))
 STUB_APP_DEPS		?= $(patsubst %.o,%.d,$(STUB_APP_OBJS))
 STUB_LDLIBS			+= $(MINIOS_LDLIBS)
 
