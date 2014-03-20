@@ -744,6 +744,7 @@ void suspend_netfront(void)
     struct netfront_dev_list *list;
 
     for (list = dev_list; list != NULL; list = list->next) {
+        netfront_clean_tx_ring(list->dev);
         _shutdown_netfront(list->dev);
     }
 }
