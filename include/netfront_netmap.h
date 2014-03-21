@@ -188,7 +188,8 @@ void netmap_netfront_xmit(void *dev, unsigned char* data, int len)
 
 void netfront_rx_interrupt(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
-	struct netmap_adapter *na = data;
+	struct netfront_dev *dev = (struct netfront_dev *) data;
+	struct netmap_adapter *na = dev->na;
 	struct netfront_csb *stat = na->stat;
 	u_int flags;
 	ND("rxsync done");
@@ -196,14 +197,14 @@ void netfront_rx_interrupt(evtchn_port_t port, struct pt_regs *regs, void *data)
 	local_irq_save(flags);
 	stat->host_need_rxkick = 1;
 	stat->guest_need_rxkick = 1;
-	wake_up(&na->rxd.wait);
 	local_irq_restore(flags);
 	mb();
 }
 
 void netfront_tx_interrupt(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
-	struct netmap_adapter *na = data;
+	struct netfront_dev *dev = (struct netfront_dev *) data;
+	struct netmap_adapter *na = dev->na;
 	struct netmap_ring *ring = na->tx_rings;
 	struct netfront_csb *stat = na->stat;
 	u_int flags;
@@ -452,13 +453,13 @@ void* init_netfront_netmap(struct netfront_dev *dev,
 	D("backend dom %d", na->dom);
 
 	if (evtchn_alloc_unbound(na->dom, netfront_tx_interrupt,
-				na, &na->tx_irq) < 0) {
+				dev, &na->tx_irq) < 0) {
 		printk("failed to allocate event-channel-tx\n");
 		goto fail;
 	}
 
 	if (evtchn_alloc_unbound(na->dom, netfront_rx_interrupt,
-				na, &na->rx_irq) < 0) {
+				dev, &na->rx_irq) < 0) {
 		printk("failed to allocate event-channel-rx\n");
 		goto fail;
 	}
