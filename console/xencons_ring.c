@@ -188,13 +188,22 @@ struct consfront_dev *xencons_ring_init(void)
 	return dev;
 }
 
-void xencons_ring_fini(struct consfront_dev **dev)
+void xencons_ring_resume(struct consfront_dev *dev)
 {
-    if (!dev || !(*dev)) {
-        unbind_evtchn(start_info.console.domU.evtchn);
+    if (!dev) {
+        unmask_evtchn(start_info.console.domU.evtchn);
     } else {
-        unbind_evtchn((*dev)->evtchn);
-        free(*dev);
-        (*dev) = NULL;
+        unmask_evtchn(dev->evtchn);
+    }
+
+	notify_daemon(dev);
+}
+
+void xencons_ring_fini(struct consfront_dev *dev)
+{
+    if (!dev) {
+        mask_evtchn(start_info.console.domU.evtchn);
+    } else {
+        mask_evtchn(dev->evtchn);
     }
 }

@@ -54,7 +54,6 @@
 /* If console not initialised the printk will be sent to xen serial line 
    NOTE: you need to enable verbose in xen/Rules.mk for it to work. */
 static int console_initialised = 0;
-static struct consfront_dev* dev;
 
 __attribute__((weak)) void console_input(char * buf, unsigned len)
 {
@@ -159,7 +158,7 @@ void xprintk(const char *fmt, ...)
 void init_console(void)
 {   
     printk("Initialising console ... ");
-    dev = xencons_ring_init();
+    xencons_ring_init();
     console_initialised = 1;
     /* This is also required to notify the daemon */
     printk("done.\n");
@@ -168,11 +167,11 @@ void init_console(void)
 void suspend_console(void)
 {
     console_initialised = 0;
-    xencons_ring_fini(&dev);
+    xencons_ring_fini(NULL);
 }
 
 void resume_console(void)
 {
-    dev = xencons_ring_init();
+    xencons_ring_resume(NULL);
     console_initialised = 1;
 }
