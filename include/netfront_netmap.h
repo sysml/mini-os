@@ -6,6 +6,9 @@
 
 unsigned __errno;
 
+struct wait_queue_head rx_queue;
+u_int rx_work_todo = 0;
+
 /**
  * Represents an entry mapped entry into
  * domains address space
@@ -84,6 +87,7 @@ struct netmap_adapter {
 
 	domid_t  dom;
 	char *nodename;
+	unsigned int devid;
 	char path[256];
 	int bufs_size;
 
@@ -110,6 +114,18 @@ void netmap_netfront_rx(struct netfront_dev *dev)
 	u_int rx = 0, limit = ring->num_slots, space;
 	u_int cur = ring->cur;
 	void *p;
+
+#ifdef CONFIG_NETFRONT_POLL
+	if (!rx_work_todo) {
+		int64_t deadline = NOW() + MICROSECS(CONFIG_NETFRONT_POLLTIMEOUT);
+		for (;;) {
+			wait_event_deadline(rx_queue, rx_work_todo > 0, deadline);
+			if (rx_work_todo || (deadline && NOW() >= deadline)) {
+				break;
+			}
+		}
+	}
+#endif
 
 	if (!stat->host_need_rxkick) {
 		return (rx);
@@ -140,6 +156,7 @@ void netmap_netfront_rx(struct netfront_dev *dev)
 
 	ring->head = ring->cur = cur;
 	stat->host_need_rxkick = 0;
+	rx_work_todo &= (~na->devid);
 	notify_remote_via_evtchn(na->rx_irq);
 	return (rx);
 }
@@ -197,6 +214,8 @@ void netfront_rx_interrupt(evtchn_port_t port, struct pt_regs *regs, void *data)
 	local_irq_save(flags);
 	stat->host_need_rxkick = 1;
 	stat->guest_need_rxkick = 1;
+	rx_work_todo |= na->devid;
+	wake_up(&rx_queue);
 	local_irq_restore(flags);
 	mb();
 }
@@ -425,22 +444,27 @@ error:
 	return -EINVAL;
 }
 
+#define rndup2(v) \
+	v--;v|=v>>1;v|=v>>2;v|=v>>4;v|=v>>8;v|=v>>16;v++;
+
 inline
 void* init_netfront_netmap(struct netfront_dev *dev,
 				void (*handler)(unsigned char* data, int len, void* arg))
 {
 	struct netmap_adapter *na;
 	xenbus_transaction_t xbt;
-	int retry = 0;
+	int retry = 0, id;
 	char *err;
 	char path[256];
 
 	na = malloc(sizeof(struct netmap_adapter));
 	memset(na,0,sizeof(struct netmap_adapter));
 	na->nodename = dev->nodename;
+	id = atoi(dev->nodename + strlen("device/vif/")) + 1;
+	rndup2(id);
+	na->devid = id;
 	na->dom = dev->dom;
 	na->netif_rx = handler;
-
 	snprintf(path, sizeof(path), "%s/feature-netmap-tx-desc", dev->backend);
 	na->num_tx_desc = xenbus_read_integer(path);
 
@@ -448,7 +472,7 @@ void* init_netfront_netmap(struct netfront_dev *dev,
 	na->num_rx_desc = xenbus_read_integer(path);
 
 	init_waitqueue_head(&na->txd.wait);
-	init_waitqueue_head(&na->rxd.wait);
+	init_waitqueue_head(&rx_queue);
 
 	D("backend dom %d", na->dom);
 
