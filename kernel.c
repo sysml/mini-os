@@ -188,7 +188,7 @@ void pre_suspend(void)
     suspend_events();
 }
 
-void post_suspend(void)
+void post_suspend(int canceled)
 {
     resume_console();
 

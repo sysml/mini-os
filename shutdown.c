@@ -131,7 +131,7 @@ void kernel_suspend(void)
     rc = HYPERVISOR_suspend(virt_to_mfn(start_info_ptr));
 
     arch_post_suspend(rc);
-    post_suspend();
+    post_suspend(rc);
 
     if (rc) {
         printk("MiniOS suspend canceled!");
