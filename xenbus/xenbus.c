@@ -374,12 +374,12 @@ void suspend_xenbus(void)
         wait_event(req_wq, (nr_live_reqs == 0));
     }
 
-    unbind_evtchn(start_info.store_evtchn);
+    mask_evtchn(start_info.store_evtchn);
     xenstore_buf = NULL;
     spin_unlock(&req_lock);
 }
 
-void resume_xenbus(void)
+void resume_xenbus(int canceled)
 {
     char *msg;
     struct watch *watch;
@@ -387,21 +387,21 @@ void resume_xenbus(void)
     struct xsd_sockmsg *rep;
 
     xenstore_buf = mfn_to_virt(start_info.store_mfn);
-
-    bind_evtchn(start_info.store_evtchn, xenbus_evtchn_handler, NULL);
     unmask_evtchn(start_info.store_evtchn);
 
-    for (watch = watches; watch; watch = watch->next) {
-        req[0].data = watch->path;
-        req[0].len = strlen(watch->path) + 1;
-        req[1].data = watch->token;
-        req[1].len = strlen(watch->token) + 1;
+    if (!canceled) {
+        for (watch = watches; watch; watch = watch->next) {
+            req[0].data = watch->path;
+            req[0].len = strlen(watch->path) + 1;
+            req[1].data = watch->token;
+            req[1].len = strlen(watch->token) + 1;
 
-        rep = xenbus_msg_reply(XS_WATCH, XBT_NIL, req, ARRAY_SIZE(req));
-        msg = errmsg(rep);
-        if (msg)
-            xprintk("error on XS_WATCH: %s\n", msg);
-        free(rep);
+            rep = xenbus_msg_reply(XS_WATCH, XBT_NIL, req, ARRAY_SIZE(req));
+            msg = errmsg(rep);
+            if (msg)
+                xprintk("error on XS_WATCH: %s\n", msg);
+            free(rep);
+        }
     }
 
     notify_remote_via_evtchn(start_info.store_evtchn);

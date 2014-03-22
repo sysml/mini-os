@@ -127,9 +127,9 @@ static inline void suspend_xenbus(void)
 #endif
 
 #ifdef CONFIG_XENBUS
-void resume_xenbus(void);
+void resume_xenbus(int canceled);
 #else
-static inline void resume_xenbus(void)
+static inline void resume_xenbus(int canceled)
 {
 }
 #endif

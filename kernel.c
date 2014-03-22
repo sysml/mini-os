@@ -198,7 +198,7 @@ void post_suspend(int canceled)
 
     local_irq_enable();
 
-    resume_xenbus();
+    resume_xenbus(canceled);
 
 #ifdef CONFIG_NETFRONT
     resume_netfront();
