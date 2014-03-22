@@ -167,7 +167,7 @@ arch_post_suspend(int canceled)
 
     HYPERVISOR_shared_info = map_shared_info(start_info_ptr->shared_info);
 
-    arch_mm_post_suspend();
+    arch_mm_post_suspend(canceled);
 }
 
 void

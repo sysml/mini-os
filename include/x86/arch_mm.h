@@ -231,6 +231,6 @@ static __inline__ paddr_t machine_to_phys(maddr_t machine)
 pgentry_t *need_pgt(unsigned long addr);
 
 void arch_mm_pre_suspend(void);
-void arch_mm_post_suspend(void);
+void arch_mm_post_suspend(int canceled);
 
 #endif /* _ARCH_MM_H_ */

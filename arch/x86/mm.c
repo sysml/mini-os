@@ -977,7 +977,7 @@ void arch_mm_pre_suspend(void)
     }
 }
 
-void arch_mm_post_suspend(void)
+void arch_mm_post_suspend(int canceled)
 {
     int rc;
     pte_t nullpte = { };
@@ -989,5 +989,6 @@ void arch_mm_post_suspend(void)
         do_exit();
     }
 
-    arch_rebuild_p2m();
+    if (!canceled)
+        arch_rebuild_p2m();
 }
