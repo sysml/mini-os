@@ -6,7 +6,7 @@
 
 unsigned __errno;
 
-struct wait_queue_head rx_queue;
+DECLARE_WAIT_QUEUE_HEAD(rx_queue);
 u_int rx_work_todo = 0;
 
 /**
@@ -472,7 +472,6 @@ void* init_netfront_netmap(struct netfront_dev *dev,
 	na->num_rx_desc = xenbus_read_integer(path);
 
 	init_waitqueue_head(&na->txd.wait);
-	init_waitqueue_head(&rx_queue);
 
 	D("backend dom %d", na->dom);
 
