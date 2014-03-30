@@ -521,6 +521,9 @@ $(STUB_APP_IMG).o: $(STUB_APP_IMG)_.o
 
 $(STUB_APP_IMG): $(STUB_APP_IMG).o
 	$(call verbose_cmd,$(LD) $(LDFLAGS) -T $(MINIOS_ARCH_LDS) $@.o -o,'LD ',$@)
+ifneq ($(debug),y)
+	$(call verbose_cmd,strip -s,'STR',$@)
+endif
 
 $(STUB_APP_IMG).gz: $(STUB_APP_IMG)
 	$(call verbose_cmd,gzip -f -9 -c $? >,GZ,$@)
