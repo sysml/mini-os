@@ -305,9 +305,12 @@ static void free_netfront(struct netfront_dev *dev)
 	free_page(dev->rx_buffers[i].page);
     }
 
-    for(i=0;i<NET_TX_RING_SIZE;i++)
-	if (dev->tx_buffers[i].page)
+    for(i=0;i<NET_TX_RING_SIZE;i++) {
+	if (dev->tx_buffers[i].page) {
+	    gnttab_end_access(dev->tx_buffers[i].gref);
 	    free_page(dev->tx_buffers[i].page);
+	}
+    }
 }
 
 void netfront_set_rx_handler(struct netfront_dev *dev, void (*thenetif_rx)(unsigned char* data, int len, void *arg), void *arg)
