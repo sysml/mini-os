@@ -575,8 +575,8 @@ done:
 
     unmask_evtchn(dev->evtchn);
 
-skip:
 #ifdef CONFIG_NETMAP
+skip:
     if (dev->netmap)
         connect_netfront(dev);
 #endif
