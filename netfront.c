@@ -428,7 +428,7 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned ch
 
 #ifdef CONFIG_NETMAP
     snprintf(path, sizeof(path), "%s/feature-netmap", dev->backend);
-    dev->netmap = xenbus_read_integer(path);
+    dev->netmap = xenbus_read_integer(path) > 0 ? 1 : 0;
 
     if (dev->netmap) {
             dev->na = init_netfront_netmap(dev, dev->netif_rx);
