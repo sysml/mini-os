@@ -332,6 +332,12 @@ HYPERVISOR_domctl(
 	return _hypercall1(int, domctl, op);
 }
 
+static inline unsigned long
+HYPERVISOR_hvm_op(int op, void *arg)
+{
+    return _hypercall2(unsigned long, hvm_op, op, arg);
+}
+
 #endif /* __HYPERCALL_X86_64_H__ */
 
 /*

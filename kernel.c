@@ -48,6 +48,7 @@
 #include <fcntl.h>
 #include <xen/features.h>
 #include <xen/version.h>
+#include <xen-features.h>
 
 uint8_t xen_features[XENFEAT_NR_SUBMAPS * 32];
 
@@ -83,6 +84,10 @@ void start_kernel(start_info_t *si)
 
     (void)HYPERVISOR_console_io(CONSOLEIO_write, strlen(hello), hello);
 
+    setup_xen_features();
+
+    pvh_early_init();
+
     arch_init(si);
 
     trap_init();
@@ -108,8 +113,6 @@ void start_kernel(start_info_t *si)
     __sti();
 
     arch_print_info();
-
-    setup_xen_features();
 
     /* Init memory management. */
     init_mm();

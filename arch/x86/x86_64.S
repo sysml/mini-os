@@ -9,6 +9,8 @@
 	.ascii	",ELF_PADDR_OFFSET=0x0"
 	.ascii	",HYPERCALL_PAGE=0x2"
 	.ascii	",LOADER=generic"
+	.asciz	",FEATURES=!writable_descriptor_tables|hvm_callback_vector|auto_translated_physmap|supervisor_mode_kernel"
+	.ascii	",SUPPORTED_FEATURES=0x10d"
 	.byte	0
 .text
 
@@ -59,7 +61,16 @@ hypercall_page:
 NMI_MASK = 0x80000000
 KERNEL_CS_MASK = 0xfc
 
+#define RBP       32
+
+#define R11		  48
+#define R10		  56
+#define R9		  64
+#define R8		  72
 #define RAX       80
+#define RCX		  88
+#define RDX		  96
+#define RSI		 104
 #define RDI      112
 #define ORIG_RAX 120       /* + error_code */
 #define RIP      128
@@ -70,9 +81,12 @@ KERNEL_CS_MASK = 0xfc
 
 /* Macros */
 .macro zeroentry sym
+	testb $1,(xen_features+XENFEAT_hvm_callback_vector)
+	jnz 1f   
 	movq (%rsp),%rcx
 	movq 8(%rsp),%r11
 	addq $0x10,%rsp /* skip rcx and r11 */
+1:
 	pushq $0	/* push error code/oldrax */
 	pushq %rax	/* push real oldrax to the rdi slot */
 	leaq  \sym(%rip),%rax
@@ -80,9 +94,12 @@ KERNEL_CS_MASK = 0xfc
 .endm
 
 .macro errorentry sym
+	testb $1,(xen_features+XENFEAT_hvm_callback_vector)
+	jnz 1f
 	movq (%rsp),%rcx
 	movq 8(%rsp),%r11
 	addq $0x10,%rsp /* rsp points to the error code */
+1:
 	pushq %rax
 	leaq  \sym(%rip),%rax
 	jmp error_entry
@@ -125,6 +142,7 @@ KERNEL_CS_MASK = 0xfc
 	testl $NMI_MASK,2*8(%rsp)
 	jnz   2f
 
+	orb   $0x10,1*8(%rsp)   # FIXME: same trick in xen_hvm_callback_vector
 	testb $1,(xen_features+XENFEAT_supervisor_mode_kernel)
 	jnz   1f
 
@@ -235,8 +253,11 @@ ecrit:  /**** END OF CRITICAL REGION ****/
 
 # Set up the stack as Xen does before calling event callback
 hypervisor_prologue:
+	testb $1,(xen_features+XENFEAT_hvm_callback_vector)
+	jnz 1f
 	pushq %r11
 	pushq %rcx
+1:
 	jmp hypervisor_callback
 
 # [How we do the fixup]. We want to merge the current stack frame with the
@@ -353,6 +374,56 @@ ENTRY(page_fault)
 
 
 
+ENTRY(xen_hvm_callback_vector)
+    pushq $~0xf3
+    subq $ORIG_RAX-RBP, %rsp
+
+    cld
+    movq %rdi, RDI-RBP(%rsp)
+    movq %rsi, RSI-RBP(%rsp)
+    movq %rdx, RDX-RBP(%rsp)
+    movq %rcx, RCX-RBP(%rsp)
+    movq %rax, RAX-RBP(%rsp)
+    movq  %r8,  R8-RBP(%rsp)
+    movq  %r9,  R9-RBP(%rsp)
+    movq %r10, R10-RBP(%rsp)
+    movq %r11, R11-RBP(%rsp)
+
+    movq %rbp, (%rsp) 
+
+    movq %rsp, %rsi
+
+    leaq -RBP(%rsp), %rdi
+
+    movq %gs:8,%rax
+	incl %gs:0
+	cmovzq %rax,%rsp
+
+    pushq %rsi
+
+	call do_hypervisor_callback
+
+    cli
+	decl %gs:0
+    popq %rsi
+    leaq R11-RBP(%rsi), %rsp
+
+    movq (%rsp), %r11
+    movq R10-R11(%rsp), %r10
+    movq  R9-R11(%rsp),  %r9
+    movq  R8-R11(%rsp),  %r8
+    movq RAX-R11(%rsp), %rax
+    movq RCX-R11(%rsp), %rcx
+    movq RDX-R11(%rsp), %rdx
+    movq RSI-R11(%rsp), %rsi
+    movq RDI-R11(%rsp), %rdi
+
+    addq $9*8+8, %rsp
+
+    # FIXME: without it, CS is initially 0x00, iretq generates GP fault
+    # better handling could replace this tricky one
+	orb   $0x10,1*8(%rsp)
+    iretq
 
 
 ENTRY(thread_starter)

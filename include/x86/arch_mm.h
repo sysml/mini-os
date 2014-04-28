@@ -35,6 +35,7 @@
 #error "Unsupported architecture"
 #endif
 #endif
+#include <xen-features.h>
 
 #define L1_FRAME                1
 #define L2_FRAME                2
@@ -166,7 +167,14 @@ typedef unsigned long maddr_t;
 extern unsigned long *phys_to_machine_mapping;
 extern char _text, _etext, _erodata, _edata, _end;
 extern unsigned long mfn_zero;
-#define pfn_to_mfn(_pfn) (phys_to_machine_mapping[(_pfn)])
+
+static __inline__ unsigned long pfn_to_mfn(unsigned long pfn)
+{
+    if (xen_feature(XENFEAT_auto_translated_physmap))
+        return pfn;
+    return phys_to_machine_mapping[pfn];
+}
+
 static __inline__ maddr_t phys_to_machine(paddr_t phys)
 {
 	maddr_t machine = pfn_to_mfn(phys >> PAGE_SHIFT);
@@ -174,7 +182,13 @@ static __inline__ maddr_t phys_to_machine(paddr_t phys)
 	return machine;
 }
 
-#define mfn_to_pfn(_mfn) (machine_to_phys_mapping[(_mfn)])
+static __inline__ unsigned long mfn_to_pfn(unsigned long mfn)
+{
+    if (xen_feature(XENFEAT_auto_translated_physmap))
+        return mfn;
+    return machine_to_phys_mapping[mfn];
+}
+
 static __inline__ paddr_t machine_to_phys(maddr_t machine)
 {
 	paddr_t phys = mfn_to_pfn(machine >> PAGE_SHIFT);

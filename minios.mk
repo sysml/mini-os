@@ -3,6 +3,7 @@
 #
 
 debug = y
+pvh = y
 
 # Define some default flags.
 # NB. '-Wcast-qual' is nasty, so I omitted it.
@@ -24,6 +25,10 @@ DEF_CFLAGS += -g
 #DEF_CFLAGS += -DGNTMAP_DEBUG
 else
 DEF_CFLAGS += -O3
+endif
+
+ifeq ($(pvh),y)
+DEF_CFLAGS += -DCONFIG_PVH
 endif
 
 # Make the headers define our internal stuff

@@ -70,13 +70,17 @@ shared_info_t *map_shared_info(unsigned long pa)
 {
     int rc;
 
-	if ( (rc = HYPERVISOR_update_va_mapping(
-              (unsigned long)shared_info, __pte(pa | 7), UVMF_INVLPG)) )
-	{
-		printk("Failed to map shared_info!! rc=%d\n", rc);
-		do_exit();
-	}
-	return (shared_info_t *)shared_info;
+    if (!xen_feature(XENFEAT_auto_translated_physmap)) {
+        if ( (rc = HYPERVISOR_update_va_mapping(
+                        (unsigned long)shared_info, __pte(pa | 7), UVMF_INVLPG)) )
+        {
+            printk("Failed to map shared_info!! rc=%d\n", rc);
+            do_exit();
+        }
+	    return (shared_info_t *)shared_info;
+    }
+    else
+		return (shared_info_t *)to_virt(start_info.shared_info);
 }
 
 static
@@ -111,8 +115,10 @@ arch_init(start_info_t *si)
 	/*Initialize floating point unit */
         fpu_init();
 
-        /* Initialize SSE */
-        sse_init();
+	/* Initialize SSE */
+    if (xen_feature(XENFEAT_hvm_callback_vector))
+        enable_osfxsr();
+    sse_init();
 
 	/* Copy the start_info struct to a globally-accessible area. */
 	/* WARN: don't do printk before here, it uses information from
@@ -121,21 +127,24 @@ arch_init(start_info_t *si)
 	start_info_ptr = si;
 
 	/* set up minimal memory infos */
-	phys_to_machine_mapping = (unsigned long *)start_info.mfn_list;
+	if (!xen_feature(XENFEAT_auto_translated_physmap))
+	    phys_to_machine_mapping = (unsigned long *)start_info.mfn_list;
 
 	/* Grab the shared_info pointer and put it in a safe place. */
 	HYPERVISOR_shared_info = map_shared_info(start_info.shared_info);
 
-	    /* Set up event and failsafe callback addresses. */
+	/* Set up event and failsafe callback addresses. */
+    if (!xen_feature(XENFEAT_hvm_callback_vector)) {
 #ifdef __i386__
-	HYPERVISOR_set_callbacks(
-		__KERNEL_CS, (unsigned long)hypervisor_callback,
-		__KERNEL_CS, (unsigned long)failsafe_callback);
+        HYPERVISOR_set_callbacks(
+                __KERNEL_CS, (unsigned long)hypervisor_callback,
+                __KERNEL_CS, (unsigned long)failsafe_callback);
 #else
-	HYPERVISOR_set_callbacks(
-		(unsigned long)hypervisor_callback,
-		(unsigned long)failsafe_callback, 0);
+        HYPERVISOR_set_callbacks(
+                (unsigned long)hypervisor_callback,
+                (unsigned long)failsafe_callback, 0);
 #endif
+    }
 
 
 }
