@@ -32,7 +32,7 @@ void machine_check(void);
 
 void dump_regs(struct pt_regs *regs)
 {
-    printk("Thread: %s\n", current->name);
+    printk("Thread: %s\n", current ? current->name : "<null>");
 #ifdef __i386__    
     printk("EIP: %x, EFLAGS %x.\n", regs->eip, regs->eflags);
     printk("EBX: %08x ECX: %08x EDX: %08x\n",
@@ -119,7 +119,7 @@ void page_walk(unsigned long virt_address)
 static int handle_cow(unsigned long addr) {
         pgentry_t *tab = (pgentry_t *)start_info.pt_base, page;
 	unsigned long new_page;
-	int rc;
+	int rc = 0;
 
 #if defined(__x86_64__)
         page = tab[l4_table_offset(addr)];
@@ -147,9 +147,16 @@ static int handle_cow(unsigned long addr) {
 	new_page = alloc_pages(0);
 	memset((void*) new_page, 0, PAGE_SIZE);
 
-	rc = HYPERVISOR_update_va_mapping(addr & PAGE_MASK, __pte(virt_to_mach(new_page) | L1_PROT), UVMF_INVLPG);
-	if (!rc)
-		return 1;
+    if (!xen_feature(XENFEAT_auto_translated_physmap)) {
+        rc = HYPERVISOR_update_va_mapping(addr & PAGE_MASK, __pte(virt_to_mach(new_page) | L1_PROT), UVMF_INVLPG);
+        if (!rc)
+            return 1;
+    }
+    else {
+        tab[l1_table_offset(addr)] = virt_to_mach(new_page) | L1_PROT;
+        flush_tlb_single(addr);
+        return 1;
+    }
 
 	printk("Map zero page to %lx failed: %d.\n", addr, rc);
 	return 0;
@@ -189,8 +196,6 @@ static void dump_mem(unsigned long addr)
     }
     printk("\n");
 }
-#define read_cr2() \
-        (HYPERVISOR_shared_info->vcpu_info[smp_processor_id()].arch.cr2)
 
 static int handling_pg_fault = 0;
 
@@ -321,10 +326,189 @@ static trap_info_t trap_table[] = {
 };
     
 
+/* Following is for gdt and idt for pvh
+ * Note that it's only for 64bit */
+
+/* GDT */
+#define GDT_ENTRIES 16
+
+#define GDT_ENTRY_KERNEL32_CS 1 
+#define GDT_ENTRY_KERNEL_CS 2   
+#define GDT_ENTRY_KERNEL_DS 3   
+#define GDT_ENTRY_DEFAULT_USER32_CS 4
+#define GDT_ENTRY_DEFAULT_USER_DS 5
+#define GDT_ENTRY_DEFAULT_USER_CS 6
+
+#define NATIVE_KERNEL_CS (GDT_ENTRY_KERNEL_CS*8)
+#define NATIVE_KERNEL_DS (GDT_ENTRY_KERNEL_DS*8)
+#define NATIVE_USER_DS   (GDT_ENTRY_DEFAULT_USER_DS*8+3)
+#define NATIVE_USER_CS   (GDT_ENTRY_DEFAULT_USER_CS*8+3)
+
+/* 8 byte segment descriptor */
+struct desc_struct {
+    union {
+        struct {
+            unsigned int a;
+            unsigned int b;
+        };
+        struct { 
+            uint16_t limit0;
+            uint16_t base0;
+            unsigned base1: 8, type: 4, s: 1, dpl: 2, p: 1;
+            unsigned limit: 4, avl: 1, l: 1, d: 1, g: 1, base2: 8;
+        };
+    };
+} __attribute__((packed));
+
+struct desc_ptr {
+    unsigned short size;
+    unsigned long address;
+} __attribute__((packed)) ;
+
+#define GDT_ENTRY_INIT(flags, base, limit) { { { \
+    .a = ((limit) & 0xffff) | (((base) & 0xffff) << 16), \
+    .b = (((base) & 0xff0000) >> 16) | (((flags) & 0xf0ff) << 8) | \
+    ((limit) & 0xf0000) | ((base) & 0xff000000), \
+} } }
+
+/* currently, KERNEL_CS is only used, others for future use */
+struct desc_struct gdt[GDT_ENTRIES] = {
+    [GDT_ENTRY_KERNEL32_CS]     = GDT_ENTRY_INIT(0xc09b, 0, 0xfffff),
+    [GDT_ENTRY_KERNEL_CS]       = GDT_ENTRY_INIT(0xa09b, 0, 0xfffff),
+    [GDT_ENTRY_KERNEL_DS]       = GDT_ENTRY_INIT(0xc093, 0, 0xfffff),
+    [GDT_ENTRY_DEFAULT_USER32_CS]   = GDT_ENTRY_INIT(0xc0fb, 0, 0xfffff),
+    [GDT_ENTRY_DEFAULT_USER_DS] = GDT_ENTRY_INIT(0xc0f3, 0, 0xfffff),
+    [GDT_ENTRY_DEFAULT_USER_CS] = GDT_ENTRY_INIT(0xa0fb, 0, 0xfffff),
+};
+struct desc_ptr gdt_descr = { GDT_ENTRIES * 8 - 1, (unsigned long) gdt};
+
+/* IDT */
+#include <xen/hvm/hvm_op.h>
+#include <xen/hvm/params.h>
+
+#define NR_VECTORS  256
+#define HVM_CALLBACK_VIA_TYPE_VECTOR 0x2
+#define HVM_CALLBACK_VIA_TYPE_SHIFT 56
+#define HVM_CALLBACK_VECTOR(x) (((uint64_t)HVM_CALLBACK_VIA_TYPE_VECTOR)<<\
+                HVM_CALLBACK_VIA_TYPE_SHIFT | (x))
+/* Vector on which hypervisor callbacks will be delivered */
+#define HYPERVISOR_CALLBACK_VECTOR  0xf3
+
+/* 16byte gate */
+struct gate_struct64 {
+    uint16_t offset_low;
+    uint16_t segment;
+    unsigned ist : 3, zero0 : 5, type : 5, dpl : 2, p : 1;
+    uint16_t offset_middle;
+    uint32_t offset_high;
+    uint32_t zero1;
+} __attribute__((packed));
+typedef struct gate_struct64 gate_desc; /* PVH only support for 64bit */
+
+gate_desc idt_table[NR_VECTORS] __attribute__((aligned(PAGE_SIZE)));
+struct desc_ptr idt_descr = { NR_VECTORS * 16 - 1, (unsigned long) idt_table };
+
+int xen_set_callback_via(uint64_t via)
+{
+#ifdef __x86_64__
+	struct xen_hvm_param a;
+	a.domid = DOMID_SELF;
+	a.index = HVM_PARAM_CALLBACK_IRQ;
+	a.value = via;
+	return HYPERVISOR_hvm_op(HVMOP_set_param, &a);
+#else
+    return 1;
+#endif
+}
+
+#define PTR_LOW(x) ((unsigned long long)(x) & 0xFFFF)
+#define PTR_MIDDLE(x) (((unsigned long long)(x) >> 16) & 0xFFFF)
+#define PTR_HIGH(x) ((unsigned long long)(x) >> 32)
+static inline void pack_gate(gate_desc *gate, unsigned type, unsigned long func,
+        unsigned dpl, unsigned ist)
+{
+    gate->offset_low    = PTR_LOW(func);
+    gate->segment       = NATIVE_KERNEL_CS;
+    gate->ist       = ist;
+    gate->p         = 1;
+    gate->dpl       = dpl;
+    gate->zero0     = 0;
+    gate->zero1     = 0;
+    gate->type      = type;
+    gate->offset_middle = PTR_MIDDLE(func);
+    gate->offset_high   = PTR_HIGH(func);
+}
+
+static inline void _set_gate(int gate, unsigned type, void *addr,
+        unsigned dpl, unsigned ist)
+{
+    gate_desc s;
+
+    pack_gate(&s, type, (unsigned long)addr, dpl, ist);
+
+    memcpy(&idt_table[gate], &s, sizeof(s));
+}
+
+#define set_intr_gate(n, addr, dpl)     \
+    do {                                \
+        BUG_ON((unsigned)n > 0xFF);             \
+        _set_gate(n, 0xE /* interrupt */, (void *)addr, dpl, 0); \
+    } while (0)
+
+#ifdef __x86_64__
+void xen_hvm_callback_vector(void);
+void xen_callback_vector(void)
+{
+	int rc;
+	uint64_t callback_via;
+
+    BUG_ON(!xen_feature(XENFEAT_hvm_callback_vector));
+
+    callback_via = HVM_CALLBACK_VECTOR(HYPERVISOR_CALLBACK_VECTOR);
+    rc = xen_set_callback_via(callback_via);
+    if (rc) {
+        printk("Request for Xen HVM callback vector failed\n");
+        return;
+    }
+    printk("Xen HVM callback vector for event delivery is enabled\n");
+    set_intr_gate(HYPERVISOR_CALLBACK_VECTOR, xen_hvm_callback_vector, 0);
+}
+#endif
+
+static inline void native_load_gdt(const struct desc_ptr *dtr)
+{   
+    asm volatile("lgdt %0"::"m" (*dtr));
+}
+
+static inline void native_load_idt(const struct desc_ptr *dtr)
+{
+    asm volatile("lidt %0"::"m" (*dtr));
+}
 
 void trap_init(void)
 {
-    HYPERVISOR_set_trap_table(trap_table);    
+    if (!xen_feature(XENFEAT_hvm_callback_vector))
+        HYPERVISOR_set_trap_table(trap_table);    
+    else {
+#ifdef __x86_64__
+        trap_info_t *t;
+        for (t = trap_table; t->address; t++) {
+            /* FIXME: do we need to care about ist and dpl for mini-os? */
+            int dpl = 0;
+            if (t->address == (unsigned long)overflow)
+                dpl = 3;
+            set_intr_gate(t->vector, t->address, dpl);
+        }
+
+        /* set hvm callback vector */
+        xen_callback_vector();
+
+        native_load_gdt((const struct desc_ptr *)&gdt_descr);
+        native_load_idt((const struct desc_ptr *)&idt_descr);
+#else
+        BUG();
+#endif
+    }
 }
 
 void trap_fini(void)

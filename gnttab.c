@@ -19,6 +19,7 @@
 #include <mini-os/mm.h>
 #include <mini-os/gnttab.h>
 #include <mini-os/semaphore.h>
+#include <xen/memory.h>     /* init gnttab for pvh */
 
 #define NR_RESERVED_ENTRIES 8
 
@@ -182,12 +183,35 @@ init_gnttab(void)
     for (i = NR_RESERVED_ENTRIES; i < NR_GRANT_ENTRIES; i++)
         put_free_entry(i);
 
-    setup.dom = DOMID_SELF;
-    setup.nr_frames = NR_GRANT_FRAMES;
-    set_xen_guest_handle(setup.frame_list, frames);
+    if (!xen_feature(XENFEAT_auto_translated_physmap)) {
+        setup.dom = DOMID_SELF;
+        setup.nr_frames = NR_GRANT_FRAMES;
+        set_xen_guest_handle(setup.frame_list, frames);
 
-    HYPERVISOR_grant_table_op(GNTTABOP_setup_table, &setup, 1);
-    gnttab_table = map_frames(frames, NR_GRANT_FRAMES);
+        HYPERVISOR_grant_table_op(GNTTABOP_setup_table, &setup, 1);
+        gnttab_table = map_frames(frames, NR_GRANT_FRAMES);
+    }
+    else {
+        struct xen_add_to_physmap xatp;
+        i = NR_GRANT_FRAMES - 1;
+
+        /* map_frames works differently if p2m is autotranslated,
+         * in that gnttab_table are just mapped with vaddrs that are the same as
+         * paddrs by mini-os itself, and provided to Xen for p2m mapping */
+        gnttab_table = map_frames(NULL, NR_GRANT_FRAMES);
+
+        for(i = NR_GRANT_FRAMES - 1; i >= 0; i--) {
+            xatp.domid = DOMID_SELF;
+            xatp.idx = i;
+            xatp.space = XENMAPSPACE_grant_table;
+            xatp.gpfn = 
+                virt_to_pfn((unsigned long)gnttab_table + (i << PAGE_SHIFT));
+            if (HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp) != 0) {
+                printk("grant table add_to_physmap failed\n");
+                break;
+            }
+        }
+    }
     printk("gnttab_table mapped at %p.\n", gnttab_table);
 }
 
