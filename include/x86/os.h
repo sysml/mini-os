@@ -82,7 +82,7 @@ void arch_fini(void);
  * includes these barriers, for example.
  */
 
-#define __cli()								\
+#define xen_irq_disable()               \
 do {									\
 	vcpu_info_t *_vcpu;						\
 	_vcpu = &HYPERVISOR_shared_info->vcpu_info[smp_processor_id()];	\
@@ -90,7 +90,7 @@ do {									\
 	barrier();							\
 } while (0)
 
-#define __sti()								\
+#define xen_irq_enable()                \
 do {									\
 	vcpu_info_t *_vcpu;						\
 	barrier();							\
@@ -101,14 +101,15 @@ do {									\
 		force_evtchn_callback();				\
 } while (0)
 
-#define __save_flags(x)							\
+/* xen_save_fl interface is different from native_save_fl for now */
+#define xen_save_fl(x)                  \
 do {									\
 	vcpu_info_t *_vcpu;						\
 	_vcpu = &HYPERVISOR_shared_info->vcpu_info[smp_processor_id()];	\
 	(x) = _vcpu->evtchn_upcall_mask;				\
 } while (0)
 
-#define __restore_flags(x)						\
+#define xen_restore_fl(x)               \
 do {									\
 	vcpu_info_t *_vcpu;						\
 	barrier();							\
@@ -120,25 +121,289 @@ do {									\
 	}\
 } while (0)
 
-#define safe_halt()		((void)0)
+#define xen_safe_halt()     HYPERVISOR_sched_op(SCHEDOP_block, 0)
 
-#define __save_and_cli(x)						\
-do {									\
-	vcpu_info_t *_vcpu;						\
-	_vcpu = &HYPERVISOR_shared_info->vcpu_info[smp_processor_id()];	\
-	(x) = _vcpu->evtchn_upcall_mask;				\
-	_vcpu->evtchn_upcall_mask = 1;					\
-	barrier();							\
+#define xen_irqs_disabled()			\
+    HYPERVISOR_shared_info->vcpu_info[smp_processor_id()].evtchn_upcall_mask
+
+#define xen_read_cr2() \
+        (HYPERVISOR_shared_info->vcpu_info[smp_processor_id()].arch.cr2)
+
+#define xen_flush_tlb_global() \
+do {    \
+    mmuext_op_t op = {                  \
+        .cmd = MMUEXT_TLB_FLUSH_ALL,    \
+    };                                  \
+    int count;                          \
+    HYPERVISOR_mmuext_op(&op, 1, &count, DOMID_SELF);   \
+} while(0)
+
+#define xen_flush_tlb() \
+do {    \
+    mmuext_op_t op = {                  \
+        .cmd = MMUEXT_TLB_FLUSH_LOCAL,  \
+    };                                  \
+    int count;                          \
+    HYPERVISOR_mmuext_op(&op, 1, &count, DOMID_SELF);   \
+} while(0)
+
+#define xen_flush_tlb_single(addr)  \
+do {    \
+    mmuext_op_t op = {                          \
+        .cmd = MMUEXT_INVLPG_LOCAL,             \
+        .arg1.linear_addr = addr & PAGE_MASK,   \
+    };                                          \
+    int count;                                  \
+    HYPERVISOR_mmuext_op(&op, 1, &count, DOMID_SELF);   \
+} while(0)
+
+
+#ifndef CONFIG_PVH
+#define __cli()             xen_irq_disable()
+#define __sti()             xen_irq_enable()
+#define __save_flags(x)     xen_save_fl(x)
+#define __restore_flags(x)  xen_restore_fl(x)
+#define safe_halt()         xen_safe_halt()
+#define __save_and_cli(x)   \
+do {  \
+    xen_save_fl(x);         \
+    xen_irq_disable();      \
 } while (0)
+#define irqs_disabled()     xen_irqs_disabled()
+#define read_cr2()          xen_read_cr2()
+#define flush_tlb_global()  xen_flush_tlb_global()
+#define flush_tlb()         xen_flush_tlb()
+#define flush_tlb_single(addr)  xen_flush_tlb_single(addr)
+#define pvh_early_init()
+#define enable_osfxsr()
+#else
+extern unsigned long __force_order;
+
+static inline unsigned long native_read_cr0(void)
+{
+	unsigned long val;
+	asm volatile("mov %%cr0,%0\n\t" : "=r" (val), "=m" (__force_order));
+	return val;
+}       
+
+static inline void native_write_cr0(unsigned long val)
+{
+	asm volatile("mov %0,%%cr0": : "r" (val), "m" (__force_order));
+} 
+
+static inline unsigned long native_read_cr2(void)
+{
+    unsigned long val;
+    asm volatile("mov %%cr2,%0\n\t" : "=r" (val), "=m" (__force_order));
+    return val;
+}
+
+static inline unsigned long native_read_cr3(void)
+{
+    unsigned long val;
+    asm volatile("mov %%cr3,%0\n\t" : "=r" (val), "=m" (__force_order));
+    return val;
+}   
+
+static inline void native_write_cr3(unsigned long val)
+{   
+    asm volatile("mov %0,%%cr3": : "r" (val), "m" (__force_order));
+}
+
+static inline unsigned long native_read_cr4(void)
+{
+    unsigned long val;
+    asm volatile("mov %%cr4,%0\n\t" : "=r" (val), "=m" (__force_order));
+    return val;
+}
+
+static inline void native_write_cr4(unsigned long val)
+{
+    asm volatile("mov %0,%%cr4": : "r" (val), "m" (__force_order));
+}
+
+static inline unsigned long native_save_fl(void)
+{
+    unsigned long flags;
+
+    /*
+     * "=rm" is safe here, because "pop" adjusts the stack before
+     * it evaluates its effective address -- this is part of the
+     * documented behavior of the "pop" instruction.
+     */
+    asm volatile("# __raw_save_flags\n\t"
+            "pushf ; pop %0"
+            : "=rm" (flags)
+            : /* no input */
+            : "memory");
+
+    return flags;
+}
+
+static inline void native_restore_fl(unsigned long flags)
+{       
+    asm volatile("push %0 ; popf"
+            : /* no output */
+            :"g" (flags)
+            :"memory", "cc");
+}   
+
+static inline void native_irq_disable(void)
+{
+    asm volatile("cli": : :"memory");
+}   
+
+static inline void native_irq_enable(void)
+{   
+    asm volatile("sti": : :"memory");
+}
+
+static inline void native_safe_halt(void)
+{   
+    asm volatile("sti; hlt": : :"memory");
+}
+
+static inline int native_irqs_disabled(void)
+{
+    return !((native_save_fl() >> 9 /* IF */) & 0x1);
+}
+
+static inline void native_flush_tlb(void)
+{
+    native_write_cr3(native_read_cr3());
+}
+
+static inline void native_flush_tlb_global(void)
+{
+    unsigned long cr4, flags;
+
+    flags = native_save_fl();
+
+    cr4 = native_read_cr4();
+    /* clear PGE */
+    native_write_cr4(cr4 & ~(1UL << 7));
+    /* write old PGE again and flush TLBs */
+    native_write_cr4(cr4);
+
+    native_restore_fl(flags);
+}
+
+static inline void native_flush_tlb_single(unsigned long addr)
+{
+    asm volatile("invlpg (%0)" ::"r" (addr) : "memory");
+}
+
+#define __cli()								\
+do {									\
+    if (xen_feature(XENFEAT_hvm_callback_vector))   \
+        native_irq_disable();   \
+    else                        \
+        xen_irq_disable();      \
+} while (0)
+
+#define __sti()								\
+do {									\
+    if (xen_feature(XENFEAT_hvm_callback_vector))   \
+        native_irq_enable();    \
+    else                        \
+        xen_irq_enable();       \
+} while (0)
+
+#define __save_flags(x)							\
+do {									\
+    if (xen_feature(XENFEAT_hvm_callback_vector))   \
+        (x) = native_save_fl();     \
+    else                            \
+        xen_save_fl(x);             \
+} while (0)
+
+#define __restore_flags(x)						\
+do {									\
+    if (xen_feature(XENFEAT_hvm_callback_vector))   \
+        native_restore_fl(x);   \
+    else                        \
+        xen_restore_fl(x);      \
+} while (0)
+
+#define safe_halt()                     \
+do {            \
+    if (xen_feature(XENFEAT_hvm_callback_vector))   \
+        native_safe_halt();     \
+    else                        \
+        xen_safe_halt();        \
+} while(0);
+
+#define __save_and_cli(x)   \
+do {  \
+    if (xen_feature(XENFEAT_hvm_callback_vector)) { \
+        (x) = native_save_fl();    \
+        native_irq_disable();   \
+    }       \
+    else {  \
+        xen_save_fl(x);         \
+        xen_irq_disable();      \
+    }   \
+} while (0)
+
+#define irqs_disabled()     \
+    (xen_feature(XENFEAT_hvm_callback_vector) ?  \
+        native_irqs_disabled() : xen_irqs_disabled())
+
+#define read_cr2()     \
+    (xen_feature(XENFEAT_auto_translated_physmap) ?   \
+        native_read_cr2() : xen_read_cr2())
+
+#define flush_tlb_global()                     \
+do {            \
+    if (xen_feature(XENFEAT_auto_translated_physmap))   \
+        native_flush_tlb_global();     \
+    else                                \
+        xen_flush_tlb_global();        \
+} while(0);
+
+#define flush_tlb()                     \
+do {            \
+    if (xen_feature(XENFEAT_auto_translated_physmap))   \
+        native_flush_tlb();     \
+    else                                \
+        xen_flush_tlb();        \
+} while(0);
+
+#define flush_tlb_single(addr)          \
+do {									\
+    if (xen_feature(XENFEAT_auto_translated_physmap))   \
+        native_flush_tlb_single(addr);   \
+    else                        \
+        xen_flush_tlb_single(addr);      \
+} while (0)
+
+static inline void pvh_early_init(void)
+{
+	if (!xen_feature(XENFEAT_auto_translated_physmap) ||
+	    !xen_feature(XENFEAT_hvm_callback_vector))
+		return;
+
+	native_write_cr0(native_read_cr0() | 
+            (1UL << 1)  /* MP */ | 
+            (1UL << 5)  /* NE */ |
+            (1UL << 16) /* WP */ |
+            (1UL << 18) /* AM */);
+#ifdef __i386__
+	BUG(); /* No support for 32bit */
+#endif
+}
+
+static inline void enable_osfxsr(void)
+{
+    native_write_cr4(native_read_cr4() | (1UL << 9)  /* OSFXSR */);
+}
+#endif
 
 #define local_irq_save(x)	__save_and_cli(x)
 #define local_irq_restore(x)	__restore_flags(x)
 #define local_save_flags(x)	__save_flags(x)
 #define local_irq_disable()	__cli()
 #define local_irq_enable()	__sti()
-
-#define irqs_disabled()			\
-    HYPERVISOR_shared_info->vcpu_info[smp_processor_id()].evtchn_upcall_mask
 
 /* This is a barrier for the compiler only, NOT the processor! */
 #define barrier() __asm__ __volatile__("": : :"memory")

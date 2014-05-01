@@ -40,6 +40,10 @@
 #include <mini-os/time.h>
 #include <mini-os/lib.h>
 
+/* vcpuop clockevent */
+#include <xen/vcpu.h>
+#include <errno.h>          
+
 /************************************************************************
  * Time functions
  *************************************************************************/
@@ -204,8 +208,18 @@ void block_domain(s_time_t until)
     ASSERT(irqs_disabled());
     if(monotonic_clock() < until)
     {
-        HYPERVISOR_set_timer_op(until);
-        HYPERVISOR_sched_op(SCHEDOP_block, 0);
+        if (!xen_feature(XENFEAT_hvm_callback_vector))
+            HYPERVISOR_set_timer_op(until);
+        else {
+            struct vcpu_set_singleshot_timer single;
+            int ret;
+
+            single.timeout_abs_ns = until;
+            single.flags = VCPU_SSHOTTMR_future;
+            ret = HYPERVISOR_vcpu_op(VCPUOP_set_singleshot_timer, 0 /* cpu */, &single);
+	        BUG_ON(ret != 0 && ret != -ETIME);
+        }
+        safe_halt();
         local_irq_disable();
     }
 }
@@ -226,6 +240,9 @@ static evtchn_port_t port;
 void init_time(void)
 {
     printk("Initialising timer interface\n");
+    if (xen_feature(XENFEAT_hvm_callback_vector))
+        if (HYPERVISOR_vcpu_op(VCPUOP_stop_periodic_timer, 0 /* cpu */, NULL))
+		    BUG();
     port = bind_virq(VIRQ_TIMER, &timer_handler, NULL);
     unmask_evtchn(port);
 }
@@ -233,7 +250,13 @@ void init_time(void)
 void fini_time(void)
 {
     /* Clear any pending timer */
-    HYPERVISOR_set_timer_op(0);
+    if (!xen_feature(XENFEAT_hvm_callback_vector))
+        HYPERVISOR_set_timer_op(0);
+    else {
+		if (HYPERVISOR_vcpu_op(VCPUOP_stop_singleshot_timer, 0 /* cpu */, NULL) ||
+		    HYPERVISOR_vcpu_op(VCPUOP_stop_periodic_timer, 0 /* cpu */, NULL))
+			BUG();
+    }
     unbind_evtchn(port);
 }
 
