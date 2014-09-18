@@ -48,6 +48,10 @@ unsigned long alloc_pages(int order);
 void free_pages(void *pointer, int order);
 #define free_page(p)    free_pages(p, 0)
 
+unsigned long mm_total_pages(void);
+unsigned long mm_reserved_pages(void);
+unsigned long mm_free_pages(void);
+
 static __inline__ int get_order(unsigned long size)
 {
     int order;
@@ -75,6 +79,7 @@ int share_frames(unsigned long va, unsigned long orig_va, unsigned long num_fram
 unsigned long alloc_contig_pages(int order, unsigned int addr_bits);
 #ifdef HAVE_LIBC
 extern unsigned long heap, brk, heap_mapped, heap_end;
+#define mm_heap_pages() ((heap_mapped - heap) / (PAGE_SIZE))
 #endif
 
 int free_physical_pages(xen_pfn_t *mfns, int n);

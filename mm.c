@@ -55,6 +55,7 @@
  */
 
 static unsigned long *alloc_bitmap;
+static unsigned long alloc_bitmap_size;
 #define PAGES_PER_MAPWORD (sizeof(unsigned long) * 8)
 
 #define allocated_in_map(_pn) \
@@ -214,8 +215,8 @@ static void init_page_allocator(unsigned long min, unsigned long max)
     max = round_pgdown(max);
 
     /* Allocate space for the allocation bitmap. */
-    bitmap_size  = (max+1) >> (PAGE_SHIFT+3);
-    bitmap_size  = round_pgup(bitmap_size);
+    alloc_bitmap_size = (max+1) >> (PAGE_SHIFT+3);
+    bitmap_size  = round_pgup(alloc_bitmap_size);
     alloc_bitmap = (unsigned long *)to_virt(min);
     min         += bitmap_size;
     range        = max - min;
@@ -370,6 +371,43 @@ int free_physical_pages(xen_pfn_t *mfns, int n)
     reservation.extent_order = 0;
     reservation.domid = DOMID_SELF;
     return HYPERVISOR_memory_op(XENMEM_decrease_reservation, &reservation);
+}
+
+/*
+ * The number of pages assigned to the
+ * machine
+ */
+unsigned long mm_total_pages(void)
+{
+    return alloc_bitmap_size << 3;
+}
+
+/*
+ * The number of pages that are not used
+ * by Mini-OS's memory management
+ */
+unsigned long mm_reserved_pages(void)
+{
+    /* all pages before the bitmap are reserved */
+    return virt_to_pfn(alloc_bitmap);
+}
+
+/*
+ * The number of pages that are still free
+ * and can be used for allocations
+ */
+unsigned long mm_free_pages(void)
+{
+    unsigned long pages_res = mm_reserved_pages();
+    unsigned long pages = mm_total_pages() - pages_res;
+    unsigned long sum = 0;
+    unsigned long i;
+
+    for(i = 0; i < pages; i++)
+        if(!allocated_in_map(i + pages_res))
+	    sum++;
+
+    return sum;
 }
 
 #ifdef HAVE_LIBC
