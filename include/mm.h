@@ -70,6 +70,8 @@ void do_map_frames(unsigned long addr,
         const unsigned long *f, unsigned long n, unsigned long stride,
 	unsigned long increment, domid_t id, int *err, unsigned long prot);
 int unmap_frames(unsigned long va, unsigned long num_frames);
+int share_frames(unsigned long va, unsigned long orig_va, unsigned long num_frames,
+                 int readonly);
 unsigned long alloc_contig_pages(int order, unsigned int addr_bits);
 #ifdef HAVE_LIBC
 extern unsigned long heap, brk, heap_mapped, heap_end;

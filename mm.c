@@ -373,6 +373,17 @@ int free_physical_pages(xen_pfn_t *mfns, int n)
 }
 
 #ifdef HAVE_LIBC
+static inline int log2(unsigned long v)
+{
+  register int o = 0;
+
+  while (v) {
+	v >>= 1;
+	++o;
+  }
+  return (o - 1);
+}
+
 void *sbrk(ptrdiff_t increment)
 {
     unsigned long old_brk = brk;
@@ -380,18 +391,48 @@ void *sbrk(ptrdiff_t increment)
 
     if (new_brk > heap_end) {
 	printk("Heap exhausted: %p + %lx = %p > %p\n", old_brk, increment, new_brk, heap_end);
-	return NULL;
+	goto no_memory;
     }
-    
+
     if (new_brk > heap_mapped) {
-        unsigned long n = (new_brk - heap_mapped + PAGE_SIZE - 1) / PAGE_SIZE;
-        do_map_zero(heap_mapped, n);
-        heap_mapped += n * PAGE_SIZE;
+	unsigned long new_pages;
+	unsigned long left;
+	unsigned long n;
+	int order;
+	int ret;
+
+	left = (new_brk - heap_mapped + PAGE_SIZE - 1) / PAGE_SIZE;
+	while (left) {
+	    /* alloc multiple pages */
+	    order = log2(left);
+	    do {
+	        new_pages = alloc_pages(order);
+	        if (!new_pages)
+		    --order; /* retry with smaller order */
+	    } while(!new_pages && order >= 0);
+	    if (!new_pages)
+	        goto no_memory;
+	    n = (1LU << order);
+
+	    /* append (share) new_pages to the heap */
+	    ret = share_frames(heap_mapped, new_pages, n, 0);
+	    if (ret != 0) {
+	        free_pages((void*) new_pages, order);
+	        goto no_memory;
+	    }
+
+	    heap_mapped += n * PAGE_SIZE;
+	    left -= n;
+        }
     }
 
     brk = new_brk;
 
     return (void *) old_brk;
+
+ no_memory:
+    printk("Could not increase heap: Out of memory\n");
+    return (void *) -1;
 }
 #endif
 
