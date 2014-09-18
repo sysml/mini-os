@@ -81,6 +81,25 @@ void xencons_tx(void)
 #endif
 
 
+#ifdef CONFIG_CONSFRONT_SYNC
+static inline int ring_send_sync(int (*ring_send_fn)(struct consfront_dev *dev, const char *data, unsigned len),
+	                         struct consfront_dev *dev, const char *data, unsigned len)
+{
+    unsigned shift = 0;
+    int ret = 0;
+
+    /* busy loop until all data has been sent out */
+    while (len) {
+        ret = ring_send_fn(dev, (data + shift), len);
+        if (ret < 0)
+            return -1;
+        shift += ret;
+        len -= ret;
+    }
+    return 0;
+}
+#endif
+
 void console_print(struct consfront_dev *dev, char *data, int length)
 {
     char *curr_char, saved_char;
@@ -104,7 +123,11 @@ void console_print(struct consfront_dev *dev, char *data, int length)
             saved_char = *(curr_char+1);
             *(curr_char+1) = '\n';
             part_len = curr_char - copied_ptr + 2;
+#ifdef CONFIG_CONSFRONT_SYNC
+            ring_send_sync(ring_send_fn, dev, copied_ptr, part_len);
+#else
             ring_send_fn(dev, copied_ptr, part_len);
+#endif
             *(curr_char+1) = saved_char;
             copied_ptr = curr_char+1;
             length -= part_len - 1;
@@ -117,7 +140,11 @@ void console_print(struct consfront_dev *dev, char *data, int length)
         length++;
     }
     
+#ifdef CONFIG_CONSFRONT_SYNC
+    ring_send_sync(ring_send_fn, dev, copied_ptr, length);
+#else
     ring_send_fn(dev, copied_ptr, length);
+#endif
 }
 
 void print(int direct, const char *fmt, va_list args)
