@@ -725,6 +725,52 @@ int unmap_frames(unsigned long va, unsigned long num_frames)
 }
 
 /*
+ * Maps num_frames frames from virtual address orig_va to va.
+ * The frame mapping at orig_va remains after the call.
+ * Returns 0 on success
+ */
+#define SHARE_BATCH ((STACK_SIZE / 8) / (sizeof(unsigned long) + sizeof(int)))
+int share_frames(unsigned long va, unsigned long orig_va, unsigned long num_frames,
+                 int readonly)
+{
+    unsigned long shift;
+    unsigned long prot = readonly ? L1_PROT_RO : L1_PROT;
+    unsigned long n = SHARE_BATCH;
+    unsigned long i;
+
+    shift = 0;
+    while (num_frames) {
+	if (n > num_frames)
+	    n = num_frames;
+
+	do {
+	    unsigned long mfns[n];
+	    int err[n];
+
+	    DEBUG("add shared mapping to 0x%lx (VA):\n",
+	          va + (shift * PAGE_SIZE));
+	    for (i = 0; i < n; ++i) {
+	        mfns[i] = virt_to_mfn(orig_va + ((i + shift) * PAGE_SIZE));
+	        DEBUG(" orig 0x%lx (VA) / 0x%lx (MFN)\n",
+	              orig_va + ((i + shift) * PAGE_SIZE), mfns[i]);
+	    }
+	    do_map_frames(va + (shift * PAGE_SIZE), mfns, n, 1, 0, DOMID_SELF, err, prot);
+	    for (i = 0; i < n; ++i) {
+		if (err[i]) {
+		    printk("share_frames failed on mfn 0x%lx with rc=%d.\n",
+		           mfns[i], err[i]);
+		    return -err[i];
+		}
+	    }
+
+	    shift += n;
+	    num_frames -= n;
+	} while(0);
+    }
+    return 0;
+}
+
+/*
  * Allocate pages which are contiguous in machine memory.
  * Returns a VA to where they are mapped or 0 on failure.
  * 

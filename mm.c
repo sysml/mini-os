@@ -55,6 +55,7 @@
  */
 
 static unsigned long *alloc_bitmap;
+static unsigned long alloc_bitmap_size;
 #define PAGES_PER_MAPWORD (sizeof(unsigned long) * 8)
 
 #define allocated_in_map(_pn) \
@@ -214,8 +215,8 @@ static void init_page_allocator(unsigned long min, unsigned long max)
     max = round_pgdown(max);
 
     /* Allocate space for the allocation bitmap. */
-    bitmap_size  = (max+1) >> (PAGE_SHIFT+3);
-    bitmap_size  = round_pgup(bitmap_size);
+    alloc_bitmap_size = (max+1) >> (PAGE_SHIFT+3);
+    bitmap_size  = round_pgup(alloc_bitmap_size);
     alloc_bitmap = (unsigned long *)to_virt(min);
     min         += bitmap_size;
     range        = max - min;
@@ -372,7 +373,55 @@ int free_physical_pages(xen_pfn_t *mfns, int n)
     return HYPERVISOR_memory_op(XENMEM_decrease_reservation, &reservation);
 }
 
+/*
+ * The number of pages assigned to the
+ * machine
+ */
+unsigned long mm_total_pages(void)
+{
+    return alloc_bitmap_size << 3;
+}
+
+/*
+ * The number of pages that are not used
+ * by Mini-OS's memory management
+ */
+unsigned long mm_reserved_pages(void)
+{
+    /* all pages before the bitmap are reserved */
+    return virt_to_pfn(alloc_bitmap);
+}
+
+/*
+ * The number of pages that are still free
+ * and can be used for allocations
+ */
+unsigned long mm_free_pages(void)
+{
+    unsigned long pages_res = mm_reserved_pages();
+    unsigned long pages = mm_total_pages() - pages_res;
+    unsigned long sum = 0;
+    unsigned long i;
+
+    for(i = 0; i < pages; i++)
+        if(!allocated_in_map(i + pages_res))
+	    sum++;
+
+    return sum;
+}
+
 #ifdef HAVE_LIBC
+static inline int log2(unsigned long v)
+{
+  register int o = 0;
+
+  while (v) {
+	v >>= 1;
+	++o;
+  }
+  return (o - 1);
+}
+
 void *sbrk(ptrdiff_t increment)
 {
     unsigned long old_brk = brk;
@@ -380,18 +429,48 @@ void *sbrk(ptrdiff_t increment)
 
     if (new_brk > heap_end) {
 	printk("Heap exhausted: %p + %lx = %p > %p\n", old_brk, increment, new_brk, heap_end);
-	return NULL;
+	goto no_memory;
     }
-    
+
     if (new_brk > heap_mapped) {
-        unsigned long n = (new_brk - heap_mapped + PAGE_SIZE - 1) / PAGE_SIZE;
-        do_map_zero(heap_mapped, n);
-        heap_mapped += n * PAGE_SIZE;
+	unsigned long new_pages;
+	unsigned long left;
+	unsigned long n;
+	int order;
+	int ret;
+
+	left = (new_brk - heap_mapped + PAGE_SIZE - 1) / PAGE_SIZE;
+	while (left) {
+	    /* alloc multiple pages */
+	    order = log2(left);
+	    do {
+	        new_pages = alloc_pages(order);
+	        if (!new_pages)
+		    --order; /* retry with smaller order */
+	    } while(!new_pages && order >= 0);
+	    if (!new_pages)
+	        goto no_memory;
+	    n = (1LU << order);
+
+	    /* append (share) new_pages to the heap */
+	    ret = share_frames(heap_mapped, new_pages, n, 0);
+	    if (ret != 0) {
+	        free_pages((void*) new_pages, order);
+	        goto no_memory;
+	    }
+
+	    heap_mapped += n * PAGE_SIZE;
+	    left -= n;
+        }
     }
 
     brk = new_brk;
 
     return (void *) old_brk;
+
+ no_memory:
+    printk("Could not increase heap: Out of memory\n");
+    return (void *) -1;
 }
 #endif
 
