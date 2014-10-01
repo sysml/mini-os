@@ -1,6 +1,7 @@
 #include <mini-os/wait.h>
 #ifdef HAVE_LWIP
 #include <lwip/netif.h>
+#include <lwip/netif/etharp.h>
 #endif
 struct netfront_dev;
 void network_rx(struct netfront_dev *dev);
@@ -18,6 +19,8 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data, size_t l
 extern struct wait_queue_head netfront_queue;
 
 #ifdef HAVE_LWIP
+struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev, struct eth_addr *out);
+
 /* Call this to bring up the netfront interface and the lwIP stack.
  * N.B. _must_ be called from a thread; it's not safe to call this from 
  * app_main(). */
