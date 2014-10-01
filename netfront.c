@@ -48,7 +48,8 @@ struct netfront_dev {
     struct netif_rx_front_ring rx;
     grant_ref_t tx_ring_ref;
     grant_ref_t rx_ring_ref;
-    evtchn_port_t evtchn;
+    evtchn_port_t tx_evtchn;
+    evtchn_port_t rx_evtchn;
 
     char *nodename;
     char *backend;
@@ -200,7 +201,7 @@ moretodo:
     
     RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->rx, notify);
     if (notify)
-        notify_remote_via_evtchn(dev->evtchn);
+        notify_remote_via_evtchn(dev->rx_evtchn);
 
 }
 
@@ -251,7 +252,18 @@ void network_tx_buf_gc(struct netfront_dev *dev)
 
 }
 
-void netfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
+void netfront_rx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
+{
+	struct netfront_dev *dev = data;
+	int fd = dev->fd;
+
+	if (fd != -1)
+		files[fd].read = 1;
+
+	wake_up(&netfront_queue);
+}
+
+void netfront_tx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
     int flags;
     struct netfront_dev *dev = data;
@@ -266,6 +278,12 @@ void netfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
         files[dev->fd].read = 1;
     wake_up(&netfront_queue);
 #endif
+}
+
+void netfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
+{
+	netfront_tx_handler(port, regs, data);
+	netfront_rx_handler(port, regs, data);
 }
 
 #ifdef HAVE_LIBC
@@ -288,6 +306,7 @@ void netfront_select_handler(evtchn_port_t port, struct pt_regs *regs, void *dat
 static void free_netfront(struct netfront_dev *dev)
 {
     int i;
+    int separate_tx_rx_irq = (dev->tx_evtchn != dev->rx_evtchn);
 
     free(dev->mac);
     free(dev->backend);
@@ -298,7 +317,9 @@ static void free_netfront(struct netfront_dev *dev)
     for(i=0;i<NET_TX_RING_SIZE;i++)
 	down(&dev->tx_sem);
 
-    mask_evtchn(dev->evtchn);
+    mask_evtchn(dev->tx_evtchn);
+	if (separate_tx_rx_irq)
+		mask_evtchn(dev->rx_evtchn);
 
     gnttab_end_access(dev->rx_ring_ref);
     gnttab_end_access(dev->tx_ring_ref);
@@ -306,7 +327,9 @@ static void free_netfront(struct netfront_dev *dev)
     free_page(dev->rx.sring);
     free_page(dev->tx.sring);
 
-    unbind_evtchn(dev->evtchn);
+    unbind_evtchn(dev->tx_evtchn);
+	if (separate_tx_rx_irq)
+	    unbind_evtchn(dev->rx_evtchn);
 
     for(i=0;i<NET_RX_RING_SIZE;i++) {
 	gnttab_end_access(dev->rx_buffers[i].gref);
@@ -416,6 +439,7 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned ch
     char* message=NULL;
     struct netif_tx_sring *txs;
     struct netif_rx_sring *rxs;
+    int feature_split_evtchn;
     int retry=0;
     int i;
     char* msg = NULL;
@@ -442,6 +466,14 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned ch
             goto skip;
     }
 #endif
+    /* Check feature-split-event-channels */
+    snprintf(path, sizeof(path), "%s/feature-split-event-channels", dev->backend);
+    feature_split_evtchn = xenbus_read_integer(path) > 0 ? 1 : 0;
+#ifdef HAVE_LIBC
+    /* Force the use of a single event channel */
+    if (dev->netif_rx == NETIF_SELECT_RX)
+        feature_split_evtchn = 0;
+#endif
 
     printk("************************ NETFRONT for %s **********\n\n\n", dev->nodename);
 
@@ -462,12 +494,19 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev, unsigned ch
         dev->rx_buffers[i].page = (char*)alloc_page();
     }
 
+	if (feature_split_evtchn) {
+		evtchn_alloc_unbound(dev->dom, netfront_tx_handler, dev, &dev->tx_evtchn);
+		evtchn_alloc_unbound(dev->dom, netfront_rx_handler, dev, &dev->rx_evtchn);
+	} else {
 #ifdef HAVE_LIBC
-    if (dev->netif_rx == NETIF_SELECT_RX)
-        evtchn_alloc_unbound(dev->dom, netfront_select_handler, dev, &dev->evtchn);
-    else
+		if (dev->netif_rx == NETIF_SELECT_RX)
+			evtchn_alloc_unbound(dev->dom, netfront_select_handler, dev, &dev->tx_evtchn);
+		else
 #endif
-        evtchn_alloc_unbound(dev->dom, netfront_handler, dev, &dev->evtchn);
+			evtchn_alloc_unbound(dev->dom, netfront_handler, dev, &dev->tx_evtchn);
+		dev->rx_evtchn = dev->tx_evtchn;
+	}
+
 
     txs = (struct netif_tx_sring *) alloc_page();
     rxs = (struct netif_rx_sring *) alloc_page();
@@ -506,11 +545,27 @@ again:
         message = "writing rx ring-ref";
         goto abort_transaction;
     }
-    err = xenbus_printf(xbt, dev->nodename,
-                "event-channel", "%u", dev->evtchn);
-    if (err) {
-        message = "writing event-channel";
-        goto abort_transaction;
+
+    if (feature_split_evtchn) {
+        err = xenbus_printf(xbt, dev->nodename,
+                    "event-channel-tx", "%u", dev->tx_evtchn);
+        if (err) {
+            message = "writing event-channel-tx";
+            goto abort_transaction;
+        }
+        err = xenbus_printf(xbt, dev->nodename,
+                    "event-channel-rx", "%u", dev->rx_evtchn);
+        if (err) {
+            message = "writing event-channel-rx";
+            goto abort_transaction;
+        }
+    } else {
+        err = xenbus_printf(xbt, dev->nodename,
+                    "event-channel", "%u", dev->tx_evtchn);
+        if (err) {
+            message = "writing event-channel";
+            goto abort_transaction;
+        }
     }
 
     err = xenbus_printf(xbt, dev->nodename, "request-rx-copy", "%u", 1);
@@ -580,7 +635,9 @@ done:
 
     printk("**************************\n");
 
-    unmask_evtchn(dev->evtchn);
+    unmask_evtchn(dev->tx_evtchn);
+    if (feature_split_evtchn)
+        unmask_evtchn(dev->rx_evtchn);
 
 #ifdef CONFIG_NETMAP
 skip:
@@ -791,8 +848,8 @@ void init_rx_buffers(struct netfront_dev *dev)
 
     RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->rx, notify);
 
-    if (notify) 
-        notify_remote_via_evtchn(dev->evtchn);
+	if (notify)
+		notify_remote_via_evtchn(dev->rx_evtchn);
 
     dev->rx.sring->rsp_event = dev->rx.rsp_cons + 1;
 }
@@ -842,7 +899,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len)
 
     RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
 
-    if(notify) notify_remote_via_evtchn(dev->evtchn);
+    if(notify) notify_remote_via_evtchn(dev->tx_evtchn);
 
     local_irq_save(flags);
     network_tx_buf_gc(dev);
