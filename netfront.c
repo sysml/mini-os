@@ -575,6 +575,13 @@ again:
 		goto abort_transaction;
 	}
 
+	err = xenbus_printf(xbt, dev->nodename, "feature-persistent", "%u", 1);
+
+	if (err) {
+		message = "writing feature-persistent";
+		goto abort_transaction;
+	}
+
     err = xenbus_printf(xbt, dev->nodename, "request-rx-copy", "%u", 1);
 
     if (err) {
