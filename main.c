@@ -172,7 +172,7 @@ void _exit(int ret)
     close_all_files();
     __libc_fini_array();
     printk("main returned %d\n", ret);
-#if defined(HAVE_LWIP) && defined(CONFIG_NETFRONT)
+#if defined(HAVE_LWIP) && defined(CONFIG_START_NETWORK) && defined(CONFIG_NETFRONT)
     stop_networking();
 #endif
     kernel_shutdown(ret);

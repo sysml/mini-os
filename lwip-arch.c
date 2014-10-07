@@ -1,9 +1,10 @@
-/* 
+/*
  * lwip-arch.c
  *
- * Arch-specific semaphores and mailboxes for lwIP running on mini-os 
+ * Arch-specific semaphores and mailboxes for lwIP running on mini-os
  *
  * Tim Deegan <Tim.Deegan@eu.citrix.net>, July 2007
+ * Simon Kuenzer <Simon.Kuenzer@neclab.eu>, October 2014
  */
 
 #include <os.h>
@@ -13,48 +14,55 @@
 #include <lwip/sys.h>
 #include <stdarg.h>
 
-/* Is called to initialize the sys_arch layer */
-void sys_init(void)
+#define MIN_ALIGN 8
+
+/* Initializes a new semaphore. The "count" argument specifies
+ * the initial state of the semaphore. */
+err_t sys_sem_new(sys_sem_t *sem, u8_t count)
 {
+    init_SEMAPHORE(&sem->sem, count);
+    sem->valid = 1;
+    return ERR_OK;
 }
 
-/* Creates and returns a new semaphore. The "count" argument specifies
- * the initial state of the semaphore. */
-sys_sem_t sys_sem_new(uint8_t count)
+int sys_sem_valid(sys_sem_t *sem)
 {
-    struct semaphore *sem = xmalloc(struct semaphore);
-    sem->count = count;
-    init_waitqueue_head(&sem->wait);
-    return sem;
+    return (sem->valid == 1);
+}
+
+void sys_sem_set_invalid(sys_sem_t *sem)
+{
+    sem->valid = 0;
 }
 
 /* Deallocates a semaphore. */
-void sys_sem_free(sys_sem_t sem)
+void sys_sem_free(sys_sem_t *sem)
 {
-    xfree(sem);
+    /* allocated on stack -> no op */
+    sys_sem_set_invalid(sem);
 }
 
 /* Signals a semaphore. */
-void sys_sem_signal(sys_sem_t sem)
+void sys_sem_signal(sys_sem_t *sem)
 {
-    up(sem);
+    up(&sem->sem);
 }
 
 /* Blocks the thread while waiting for the semaphore to be
  * signaled. If the "timeout" argument is non-zero, the thread should
  * only be blocked for the specified time (measured in
  * milliseconds).
- * 
+ *
  * If the timeout argument is non-zero, the return value is the number of
  * milliseconds spent waiting for the semaphore to be signaled. If the
  * semaphore wasn't signaled within the specified time, the return value is
  * SYS_ARCH_TIMEOUT. If the thread didn't have to wait for the semaphore
  * (i.e., it was already signaled), the function may return zero. */
-uint32_t sys_arch_sem_wait(sys_sem_t sem, uint32_t timeout)
+u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
 {
     /* Slightly more complicated than the normal minios semaphore:
      * need to wake on timeout *or* signal */
-    sys_prot_t prot;
+    int flags;
     int64_t then = NOW();
     int64_t deadline;
 
@@ -64,81 +72,94 @@ uint32_t sys_arch_sem_wait(sys_sem_t sem, uint32_t timeout)
 	deadline = then + MILLISECS(timeout);
 
     while(1) {
-        wait_event_deadline(sem->wait, (sem->count > 0), deadline);
+        wait_event_deadline(sem->sem.wait, (sem->sem.count > 0), deadline);
 
-        prot = sys_arch_protect();
+        local_irq_save(flags);
 	/* Atomically check that we can proceed */
-	if (sem->count > 0 || (deadline && NOW() >= deadline))
+	if (sem->sem.count > 0 || (deadline && NOW() >= deadline))
 	    break;
-        sys_arch_unprotect(prot);
+        local_irq_restore(flags);
     }
 
-    if (sem->count > 0) {
-        sem->count--;
-        sys_arch_unprotect(prot);
-        return NSEC_TO_MSEC(NOW() - then); 
+    if (sem->sem.count > 0) {
+        sem->sem.count--;
+        local_irq_restore(flags);
+        return NSEC_TO_MSEC(NOW() - then);
     }
-    
-    sys_arch_unprotect(prot);
+
+    local_irq_restore(flags);
     return SYS_ARCH_TIMEOUT;
 }
 
 /* Creates an empty mailbox. */
-sys_mbox_t sys_mbox_new(int size)
+err_t sys_mbox_new(sys_mbox_t *mbox, int size)
 {
-    struct mbox *mbox = xmalloc(struct mbox);
+    ASSERT(size >= 0);
+
     if (!size)
         size = 32;
-    else if (size == 1)
-        size = 2;
-    mbox->count = size;
-    mbox->messages = xmalloc_array(void*, size);
+    mbox->count = size + 1;
+    mbox->messages = xmalloc_array(void*, size + 1);
+    if (!mbox->messages)
+        return ERR_MEM;
     init_SEMAPHORE(&mbox->read_sem, 0);
     mbox->reader = 0;
     init_SEMAPHORE(&mbox->write_sem, size);
     mbox->writer = 0;
-    return mbox;
+    mbox->valid = 1;
+    return ERR_OK;
+}
+
+int sys_mbox_valid(sys_mbox_t *mbox)
+{
+    return (mbox->valid == 1);
+}
+
+void sys_mbox_set_invalid(sys_mbox_t *mbox)
+{
+    mbox->valid = 0;
 }
 
 /* Deallocates a mailbox. If there are messages still present in the
  * mailbox when the mailbox is deallocated, it is an indication of a
  * programming error in lwIP and the developer should be notified. */
-void sys_mbox_free(sys_mbox_t mbox)
+void sys_mbox_free(sys_mbox_t *mbox)
 {
     ASSERT(mbox->reader == mbox->writer);
-    xfree(mbox->messages);
-    xfree(mbox);
+    sys_mbox_set_invalid(mbox);
+    if (mbox->messages) {
+        xfree(mbox->messages);
+        mbox->messages = NULL;
+    }
 }
 
 /* Posts the "msg" to the mailbox, internal version that actually does the
  * post. */
-static void do_mbox_post(sys_mbox_t mbox, void *msg)
+static void do_mbox_post(sys_mbox_t *mbox, void *msg)
 {
     /* The caller got a semaphore token, so we are now allowed to increment
      * writer, but we still need to prevent concurrency between writers
      * (interrupt handler vs main) */
-    sys_prot_t prot = sys_arch_protect();
+    int flags;
+
+    local_irq_save(flags);
     mbox->messages[mbox->writer] = msg;
     mbox->writer = (mbox->writer + 1) % mbox->count;
     ASSERT(mbox->reader != mbox->writer);
-    sys_arch_unprotect(prot);
+    local_irq_restore(flags);
     up(&mbox->read_sem);
 }
 
 /* Posts the "msg" to the mailbox. */
-void sys_mbox_post(sys_mbox_t mbox, void *msg)
+void sys_mbox_post(sys_mbox_t *mbox, void *msg)
 {
-    if (mbox == SYS_MBOX_NULL)
-        return;
     down(&mbox->write_sem);
     do_mbox_post(mbox, msg);
 }
 
 /* Try to post the "msg" to the mailbox. */
-err_t sys_mbox_trypost(sys_mbox_t mbox, void *msg)
+err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg)
 {
-    if (mbox == SYS_MBOX_NULL)
-        return ERR_BUF;
     if (!trydown(&mbox->write_sem))
         return ERR_MEM;
     do_mbox_post(mbox, msg);
@@ -149,18 +170,19 @@ err_t sys_mbox_trypost(sys_mbox_t mbox, void *msg)
  * Fetch a message from a mailbox. Internal version that actually does the
  * fetch.
  */
-static void do_mbox_fetch(sys_mbox_t mbox, void **msg)
+static void do_mbox_fetch(sys_mbox_t *mbox, void **msg)
 {
-    sys_prot_t prot;
     /* The caller got a semaphore token, so we are now allowed to increment
      * reader, but we may still need to prevent concurrency between readers.
      * FIXME: can there be concurrent readers? */
-    prot = sys_arch_protect();
+    int flags;
+
+    local_irq_save(flags);
     ASSERT(mbox->reader != mbox->writer);
     if (msg != NULL)
         *msg = mbox->messages[mbox->reader];
     mbox->reader = (mbox->reader + 1) % mbox->count;
-    sys_arch_unprotect(prot);
+    local_irq_restore(flags);
     up(&mbox->write_sem);
 }
 
@@ -174,16 +196,34 @@ static void do_mbox_fetch(sys_mbox_t mbox, void **msg)
  * The return values are the same as for the sys_arch_sem_wait() function:
  * Number of milliseconds spent waiting or SYS_ARCH_TIMEOUT if there was a
  * timeout. */
-uint32_t sys_arch_mbox_fetch(sys_mbox_t mbox, void **msg, uint32_t timeout)
+u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 {
-    uint32_t rv;
-    if (mbox == SYS_MBOX_NULL)
-        return SYS_ARCH_TIMEOUT;
+    int flags;
+    int64_t then = NOW();
+    int64_t deadline;
 
-    rv = sys_arch_sem_wait(&mbox->read_sem, timeout);
-    if ( rv == SYS_ARCH_TIMEOUT )
-        return rv;
+    if (timeout == 0)
+	deadline = 0;
+    else
+	deadline = then + MILLISECS(timeout);
 
+    while(1) {
+        wait_event_deadline(mbox->read_sem.wait, (mbox->read_sem.count > 0), deadline);
+
+        local_irq_save(flags);
+	/* Atomically check that we can proceed */
+	if (mbox->read_sem.count > 0 || (deadline && NOW() >= deadline))
+	    break;
+        local_irq_restore(flags);
+    }
+
+    if (mbox->read_sem.count <= 0) {
+      local_irq_restore(flags);
+      return SYS_ARCH_TIMEOUT;
+    }
+
+    mbox->read_sem.count--;
+    local_irq_restore(flags);
     do_mbox_fetch(mbox, msg);
     return 0;
 }
@@ -199,10 +239,7 @@ uint32_t sys_arch_mbox_fetch(sys_mbox_t mbox, void **msg, uint32_t timeout)
  *     sys_arch_mbox_fetch(mbox,msg,1)
  * although this would introduce unnecessary delays. */
 
-uint32_t sys_arch_mbox_tryfetch(sys_mbox_t mbox, void **msg) {
-    if (mbox == SYS_MBOX_NULL)
-        return SYS_ARCH_TIMEOUT;
-
+u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg) {
     if (!trydown(&mbox->read_sem))
 	return SYS_MBOX_EMPTY;
 
@@ -210,84 +247,65 @@ uint32_t sys_arch_mbox_tryfetch(sys_mbox_t mbox, void **msg) {
     return 0;
 }
 
-
-/* Returns a pointer to the per-thread sys_timeouts structure. In lwIP,
- * each thread has a list of timeouts which is repressented as a linked
- * list of sys_timeout structures. The sys_timeouts structure holds a
- * pointer to a linked list of timeouts. This function is called by
- * the lwIP timeout scheduler and must not return a NULL value. 
- *
- * In a single threadd sys_arch implementation, this function will
- * simply return a pointer to a global sys_timeouts variable stored in
- * the sys_arch module. */
-struct sys_timeouts *sys_arch_timeouts(void) 
-{
-    static struct sys_timeouts timeout;
-    return &timeout;
-}
-
-
 /* Starts a new thread with priority "prio" that will begin its execution in the
  * function "thread()". The "arg" argument will be passed as an argument to the
  * thread() function. The id of the new thread is returned. Both the id and
  * the priority are system dependent. */
-static struct thread *lwip_thread;
-sys_thread_t sys_thread_new(char *name, void (* thread)(void *arg), void *arg, int stacksize, int prio)
+sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread, void *arg, int stacksize, int prio)
 {
-    struct thread *t;
+    static struct thread *t;
     if (stacksize > STACK_SIZE) {
 	printk("Can't start lwIP thread: stack size %d is too large for our %d\n", stacksize, STACK_SIZE);
 	do_exit();
     }
-    lwip_thread = t = create_thread(name, thread, arg);
+    t = create_thread((char *) name, thread, arg);
     return t;
 }
 
-/* This optional function does a "fast" critical region protection and returns
- * the previous protection level. This function is only called during very short
- * critical regions. An embedded system which supports ISR-based drivers might
- * want to implement this function by disabling interrupts. Task-based systems
- * might want to implement this by using a mutex or disabling tasking. This
- * function should support recursive calls from the same task or interrupt. In
- * other words, sys_arch_protect() could be called while already protected. In
- * that case the return value indicates that it is already protected.
- *
- * sys_arch_protect() is only required if your port is supporting an operating
- * system. */
-sys_prot_t sys_arch_protect(void)
+/* This function is called before the any other sys_arch-function is
+ * called and is meant to be used to initialize anything that has to
+ * be up and running for the rest of the functions to work. for
+ * example to set up a pool of semaphores. */
+void sys_init(void)
 {
-    unsigned long flags;
-    local_irq_save(flags);
-    return flags;
+    return;
 }
 
-/* This optional function does a "fast" set of critical region protection to the
- * value specified by pval. See the documentation for sys_arch_protect() for
- * more information. This function is only required if your port is supporting
- * an operating system. */
-void sys_arch_unprotect(sys_prot_t pval)
+u32_t sys_now(void)
 {
-    local_irq_restore(pval);
+    return ((u32_t) NOW());
 }
 
-/* non-fatal, print a message. */
-void lwip_printk(char *fmt, ...)
+#if MEM_LIBC_MALLOC
+/* mini-os malloc/free wrapper */
+#include <limits.h> /* required by <mini-os/xmalloc.h> */
+#include <mini-os/xmalloc.h>
+
+void *lwip_malloc(size_t size)
 {
-    va_list args;
-    va_start(args, fmt);
-    printk("lwIP: ");
-    print(0, fmt, args);
-    va_end(args);
+    void *obj = _xmalloc(size, MIN_ALIGN);
+#ifdef LWIP_DEBUG_MALLOC
+    printk("lwip-malloc: %p, %lu B\n", obj, size);
+#endif
+    return obj;
 }
 
-/* fatal, print message and abandon execution. */
-void lwip_die(char *fmt, ...)
+void *lwip_calloc(int num, size_t size)
 {
-    va_list args;
-    va_start(args, fmt);
-    printk("lwIP assertion failed: ");
-    print(0, fmt, args);
-    va_end(args);
-    printk("\n");
-    BUG();
+    void *obj = _xmalloc((size) * (num), MIN_ALIGN);
+#ifdef LWIP_DEBUG_MALLOC
+    printk("lwip-calloc: %p, %d * %lu B (= %lu B)\n", obj, num, size, num * size);
+#endif
+    if(obj)
+        memset(obj, 0, (num) * (size));
+    return obj;
 }
+
+void lwip_free(void *ptr)
+{
+#ifdef LWIP_DEBUG_MALLOC
+    printk("lwip-free:   %p\n", ptr);
+#endif
+    xfree(ptr);
+}
+#endif

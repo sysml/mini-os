@@ -130,6 +130,12 @@ CONFIG_CONSFRONT_SYNC		?= n
 CONFIG_XENBUS			?= y
 CONFIG_XC				?= y
 CONFIG_LWIP				?= y
+CONFIG_LWIP_NOTHREADS			?= n
+CONFIG_LWIP_HEAP_ONLY			?= n
+CONFIG_LWIP_POOLS_ONLY			?= n
+CONFIG_LWIP_MINIMAL			?= y
+CONFIG_LWIP_CHECKSUM_NOGEN		?= n
+CONFIG_LWIP_CHECKSUM_NOCHECK		?= n
 CONFIG_SHUTDOWN			?= y
 CONFIG_PVH				?= y
 
@@ -300,68 +306,84 @@ distclean-minios:
 ################################################################################
 ifeq ($(CONFIG_LWIP),y)
 MINIOS_LWIP_SRC_DIR	 = $(LWIP_ROOT)/src/lwip
-MINIOS_LWIP_SUBDIRS	 = core core/snmp core/ipv4 netif netif/ppp api
+MINIOS_LWIP_SUBDIRS	 = core core/snmp core/ipv4 core/ipv6 netif netif/ppp api
 MINIOS_LWIP_OBJ_DIR	 = $(MINIOS_OBJ_DIR)/lwip
-MINIOS_LWIP_OBJS0 :=	\
-	msg_out.o			\
-	asn1_dec.o			\
-	mib_structs.o		\
-	asn1_enc.o			\
-	msg_in.o			\
-	mib2.o				\
-	dhcp.o				\
-	sys.o				\
-	igmp.o				\
-	inet_chksum.o		\
-	autoip.o			\
-	ip_addr.o			\
-	ip_frag.o			\
-	inet.o				\
-	ip.o				\
-	icmp.o				\
-	tcp_out.o			\
-	tcp_in.o			\
-	mem.o				\
-	init.o				\
-	tcp.o				\
-	pbuf.o				\
-	raw.o				\
-	stats.o				\
-	netif.o				\
-	dns.o				\
-	memp.o				\
-	udp.o				\
-	etharp.o			\
-	slipif.o			\
-	fsm.o				\
-	md5.o				\
-	chpms.o				\
-	lcp.o				\
-	randm.o				\
-	ipcp.o				\
-	auth.o				\
-	chap.o				\
-	pap.o				\
-	vj.o				\
-	ppp.o				\
-	ppp_oe.o			\
-	magic.o				\
-	loopif.o			\
-	netifapi.o			\
-	sockets.o			\
-	netdb.o				\
-	netbuf.o			\
-	tcpip.o				\
-	api_lib.o			\
-	api_msg.o			\
-	err.o
+
+MINIOS_OBJS0-$(CONFIG_LWIP)	+= lwip-net.o		\
+				   lwip-arch.o
+MINIOS_LWIP_OBJS0 :=	api_msg.o	\
+			netifapi.o	\
+			err.o		\
+			netdb.o		\
+			sockets.o	\
+			api_lib.o	\
+			tcpip.o		\
+			netbuf.o	\
+			icmp.o		\
+			igmp.o		\
+			inet_chksum.o	\
+			ip4_addr.o	\
+			ip4.o		\
+			ip_frag.o	\
+			tcp_out.o	\
+			stats.o		\
+			dns.o		\
+			pbuf.o		\
+			tcp_in.o	\
+			sys.o		\
+			tcp.o		\
+			mem.o		\
+			def.o		\
+			timers.o	\
+			netif.o		\
+			init.o		\
+			memp.o		\
+			dhcp.o		\
+			udp.o		\
+			raw.o		\
+			ethernetif.o	\
+			etharp.o
+
+ifneq ($(CONFIG_LWIP_MINIMAL),y)
+MINIOS_LWIP_OBJS0 +=  	autoip.o	\
+			slipif.o	\
+			ppp_oe.o	\
+			ppp.o		\
+			randm.o		\
+			magic.o		\
+			ipcp.o		\
+			chpms.o		\
+			vj.o		\
+			md5.o		\
+			auth.o		\
+			lcp.o		\
+			fsm.o		\
+			pap.o		\
+			chap.o		\
+			asn1_enc.o	\
+			mib_structs.o	\
+			msg_in.o	\
+			mib2.o		\
+			msg_out.o	\
+			asn1_dec.o
+endif
+
 MINIOS_LWIP_OBJS	 = $(addprefix $(MINIOS_LWIP_OBJ_DIR)/,$(MINIOS_LWIP_OBJS0))
 MINIOS_LWIP_DEPS	 = $(patsubst %.o,%.d,$(MINIOS_LWIP_OBJS))
 MINIOS_LWIP_LIB		 = $(MINIOS_LWIP_OBJ_DIR)/liblwip.a
 
+LWIP_OPT_FLAGS-$(CONFIG_LWIP_NOTHREADS)		+= -DCONFIG_LWIP_NOTHREADS
+LWIP_OPT_FLAGS-$(CONFIG_LWIP_HEAP_ONLY)		+= -DCONFIG_LWIP_HEAP_ONLY
+LWIP_OPT_FLAGS-$(CONFIG_LWIP_POOLS_ONLY)	+= -DCONFIG_LWIP_POOLS_ONLY
+LWIP_OPT_FLAGS-$(CONFIG_LWIP_MINIMAL)		+= -DCONFIG_LWIP_MINIMAL
+LWIP_OPT_FLAGS-$(CONFIG_LWIP_CHECKSUM_NOGEN)	+= -DCONFIG_LWIP_CHECKSUM_NOGEN
+LWIP_OPT_FLAGS-$(CONFIG_LWIP_CHECKSUM_NOCHECK)	+= -DCONFIG_LWIP_CHECKSUM_NOCHECK
+
 CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip
 CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip/ipv4
+CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip/ipv6
 CDEFINES			+= -DHAVE_LWIP
+CDEFINES			+= $(LWIP_OPT_FLAGS-y)
 BUILD_DIRS			+= $(MINIOS_LWIP_OBJ_DIR)
 DEPS				+= $(MINIOS_LWIP_DEPS)
 
@@ -568,4 +590,3 @@ $(BUILD_DIRS):
 clean: clean-minios clean-lwip clean-stub
 distclean: distclean-minios distclean-lwip distclean-stub
 	$(call verbose_cmd,$(RMDIR),'CLN',$(STUBDOM_BUILD_DIR))
-

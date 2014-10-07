@@ -1,19 +1,49 @@
-/* 
- * lwip-net.c
+/*
+ * Mini-OS netfront driver for lwIP
  *
- * interface between lwIP's ethernet and Mini-os's netfront.
- * For now, support only one network interface, as mini-os does.
+ *   file: lwip-net.c
  *
- * Tim Deegan <Tim.Deegan@eu.citrix.net>, July 2007
- * based on lwIP's ethernetif.c skeleton file, copyrights as below.
+ *          NEC Europe Ltd. PROPRIETARY INFORMATION
+ *
+ * This software is supplied under the terms of a license agreement
+ * or nondisclosure agreement with NEC Europe Ltd. and may not be
+ * copied or disclosed except in accordance with the terms of that
+ * agreement. The software and its source code contain valuable trade
+ * secrets and confidential information which have to be maintained in
+ * confidence.
+ * Any unauthorized publication, transfer to third parties or duplication
+ * of the object or source code - either totally or in part – is
+ * prohibited.
+ *
+ *      Copyright (c) 2015 NEC Europe Ltd. All Rights Reserved.
+ *
+ * Authors: Simon Kuenzer <simon.kuenzer@neclab.eu>
+ *
+ * NEC Europe Ltd. DISCLAIMS ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO IMPLIED WARRANTIES OF MERCHANTABILITY
+ * AND FITNESS FOR A PARTICULAR PURPOSE AND THE WARRANTY AGAINST LATENT
+ * DEFECTS, WITH RESPECT TO THE PROGRAM AND THE ACCOMPANYING
+ * DOCUMENTATION.
+ *
+ * No Liability For Consequential Damages IN NO EVENT SHALL NEC Europe
+ * Ltd., NEC Corporation OR ANY OF ITS SUBSIDIARIES BE LIABLE FOR ANY
+ * DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES FOR LOSS
+ * OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF INFORMATION, OR
+ * OTHER PECUNIARY LOSS AND INDIRECT, CONSEQUENTIAL, INCIDENTAL,
+ * ECONOMIC OR PUNITIVE DAMAGES) ARISING OUT OF THE USE OF OR INABILITY
+ * TO USE THIS PROGRAM, EVEN IF NEC Europe Ltd. HAS BEEN ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGES.
+ *
+ *     THIS HEADER MAY NOT BE EXTRACTED OR MODIFIED IN ANY WAY.
+ *
+ * This file is based on Ethernet Interface skeleton (ethernetif.c)
+ * provided by lwIP-1.4.1, copyrights as below.
  */
-
-
 /*
  * Copyright (c) 2001-2004 Swedish Institute of Computer Science.
- * All rights reserved. 
- * 
- * Redistribution and use in source and binary forms, with or without modification, 
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
  * are permitted provided that the following conditions are met:
  *
  * 1. Redistributions of source code must retain the above copyright notice,
@@ -22,365 +52,413 @@
  *    this list of conditions and the following disclaimer in the documentation
  *    and/or other materials provided with the distribution.
  * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission. 
+ *    derived from this software without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED 
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT 
- * SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT 
- * OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING 
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY 
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+ * SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
+ * OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+ * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
  * OF SUCH DAMAGE.
  *
  * This file is part of the lwIP TCP/IP stack.
- * 
+ *
  * Author: Adam Dunkels <adam@sics.se>
  *
  */
 
-#include <os.h>
-
-#include "lwip/opt.h"
+#include <lwip-net.h>
 #include "lwip/def.h"
 #include "lwip/mem.h"
 #include "lwip/pbuf.h"
-#include "lwip/sys.h"
-
 #include <lwip/stats.h>
-#include <lwip/sys.h>
-#include <lwip/mem.h>
-#include <lwip/memp.h>
-#include <lwip/pbuf.h>
-#include <netif/etharp.h>
-#include <lwip/tcpip.h>
-#include <lwip/tcp.h>
-#include <lwip/netif.h>
-#include <lwip/dhcp.h>
+#include <lwip/snmp.h>
 
-#include "netif/etharp.h"
+#define NETFRONTIF_NPREFIX 'e'
+#define NETFRONTIF_SPEED 10000000000ul     /* 10 GBit/s */
+#define NETFRONTIF_MTU 1500
 
-#include <netfront.h>
-
-/* Define those to better describe your network interface. */
-#define IFNAME0 'e'
-#define IFNAME1 'n'
-
-#define IF_IPADDR	0x00000000
-#define IF_NETMASK	0x00000000
-
-/* Only have one network interface at a time. */
-static struct netif *the_interface = NULL;
-
-static unsigned char rawmac[6];
-static struct netfront_dev *dev;
-
-/* Forward declarations. */
-static err_t netfront_output(struct netif *netif, struct pbuf *p,
-             struct ip_addr *ipaddr);
-
-/*
- * low_level_output():
- *
- * Should do the actual transmission of the packet. The packet is
- * contained in the pbuf that is passed to the function. This pbuf
- * might be chained.
- *
+/**
+ * Helper macro
  */
+#ifndef min
+#define min(a, b)						\
+    ({ __typeof__ (a) __a = (a);				\
+       __typeof__ (b) __b = (b);				\
+       __a < __b ? __a : __b; })
+#endif
 
-static err_t
-low_level_output(struct netif *netif, struct pbuf *p)
+/**
+ * This function does the actual transmission of a packet. The packet is
+ * contained in the pbuf that is passed to the function. This pbuf
+ * can be chained.
+ *
+ * @param netif
+ *  the lwip network interface structure for this netfrontif
+ * @param p
+ *  the packet to send (e.g. IP packet including MAC addresses and type)
+ * @return
+ *  ERR_OK when the packet could be sent; an err_t value otherwise
+ */
+static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 {
-  if (!dev)
+    struct netfrontif *nfi = netif->state;
+    struct pbuf *q;
+    unsigned char *cur;
+
+    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: %c%c: "
+			      "Transmitting %u bytes\n",
+			      netif->name[0], netif->name[1],
+			      p->tot_len));
+
+#if ETH_PAD_SIZE
+    pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
+#endif
+
+    if (!p->next) {
+        /* fast case: no further buffer allocation needed */
+        netfront_xmit(nfi->dev, (unsigned char *) p->payload, p->len);
+    } else {
+        unsigned char data[p->tot_len];
+
+        for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
+            MEMCPY(cur, q->payload, q->len);
+
+        netfront_xmit(nfi->dev, data, p->tot_len);
+    }
+
+#if ETH_PAD_SIZE
+    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
+#endif
+
+    LINK_STATS_INC(link.xmit);
+    return ERR_OK;
+}
+
+/**
+ * Allocates a pbuf and copies data into it
+ *
+ * @param data
+ *  the pointer to packet data to be copied into the pbuf
+ * @param len
+ *  the length of data in bytes
+ * @return
+ *  NULL when a pbuf could not be allocated; the pbuf otherwise
+ */
+static inline struct pbuf *netfrontif_mkpbuf(unsigned char *data, int len)
+{
+    struct pbuf *p, *q;
+    unsigned char *cur;
+
+    p = pbuf_alloc(PBUF_RAW, len + ETH_PAD_SIZE, PBUF_POOL);
+    if (unlikely(!p))
+        return NULL;
+
+#if ETH_PAD_SIZE
+    pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
+#endif
+
+    if (likely(!p->next)) {
+        /* fast path */
+        MEMCPY(p->payload, data, len);
+    } else {
+        /* pbuf chain */
+        for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
+            MEMCPY(q->payload, cur, q->len);
+    }
+
+#if ETH_PAD_SIZE
+    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
+#endif
+
+    return p;
+}
+
+/**
+ * Passes a pbuf to the lwIP stack for further processing.
+ * The packet type is determined and checked before passing.
+ * Note: When lwIP is built with threading, this pbuf will
+ * be enqueued to lwIP's mailbox until it gets processed
+ * by the tcpip thread.
+ *
+ * @param p
+ *  the pointer to received packet data
+ * @param netif
+ *  the lwip network interface structure for this netfrontif
+ */
+static inline void netfrontif_input(struct pbuf *p, struct netif *netif)
+{
+    struct eth_hdr *ethhdr;
+    err_t err;
+
+    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_input: %c%c: "
+			      "Received %u bytes\n",
+			      netif->name[0], netif->name[1],
+			      p->tot_len));
+
+    ethhdr = p->payload;
+    switch (htons(ethhdr->type)) {
+    /* IP or ARP packet? */
+    case ETHTYPE_IP:
+#if IPV6_SUPPORT
+    case ETHTYPE_IPV6:
+#endif
+    case ETHTYPE_ARP:
+#if PPPOE_SUPPORT
+    case ETHTYPE_PPPOEDISC:
+    case ETHTYPE_PPPOE:
+#endif
+    /* packet will be sent to lwIP stack for processing */
+    /* Note: On threaded configuration packet buffer will be enqueued on
+     *  a mailbox. The lwIP thread will do the packet processing when it gets
+     *  scheduled. */
+        err = netif->input(p, netif);
+	if (unlikely(err != ERR_OK)) {
+#ifndef CONFIG_LWIP_NOTHREADS
+	    if (err == ERR_MEM)
+	        LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_input: %c%c: ERROR %d: "
+					  "Could not post packet to lwIP thread. Packet dropped\n",
+					  netif->name[0], netif->name[1], err));
+	    else
+#endif /* CONFIG_LWIP_NOTHREADS */
+	    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_input: %c%c: ERROR %d: "
+				      "Packet dropped\n",
+				      netif->name[0], netif->name[1], err));
+	    pbuf_free(p);
+	}
+	break;
+
+    default:
+        LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_input: %c%c: ERROR: "
+				  "Dropped packet with unknown type 0x%04x\n",
+				  netif->name[0], netif->name[1],
+				  htons(ethhdr->type)));
+	pbuf_free(p);
+	break;
+    }
+}
+
+/**
+ * Callback to netfront that pushed a received packet to lwIP.
+ * Is is called by netfrontif_poll() for each received packet.
+ *
+ * @param data
+ *  the pointer to received packet data
+ * @param len
+ *  the length of data in bytes
+ * @param argp
+ *  pointer to netif
+ */
+static void netfrontif_rx_handler(unsigned char *data, int len, void *argp)
+{
+    struct netif *netif = argp;
+    struct pbuf *p;
+
+    p = netfrontif_mkpbuf(data, len);
+    if (unlikely(!p)) {
+        LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_rx_handler: %c%c: ERROR: "
+				  "Packet dropped: Out of pbufs\n",
+				  netif->name[0], netif->name[1]));
+        LINK_STATS_INC(link.memerr);
+        LINK_STATS_INC(link.drop);
+        return;
+    }
+    LINK_STATS_INC(link.recv);
+    netfrontif_input(p, netif);
+}
+
+#ifndef CONFIG_LWIP_NOTHREADS
+/**
+ * Network polling thread function
+ *
+ * @param argp
+ *  pointer to netif
+ */
+/* TODO: Use mini-os's blocking poll */
+static void netfrontif_thread(void *argp)
+{
+    struct netif *netif = argp;
+    struct netfrontif *nfi = netif->state;
+    struct netfront_dev *dev = nfi->dev;
+
+    while (likely(!nfi->_thread_exit)) {
+        network_rx(dev);
+        schedule();
+    }
+
+    nfi->_thread_exit = 0;
+}
+#endif /* CONFIG_LWIP_NOTHREADS */
+
+#if LWIP_NETIF_REMOVE_CALLBACK
+/**
+ * Closes a network interface.
+ * This function is called by lwIP on netif_remove().
+ *
+ * @param netif
+ *  the lwip network interface structure for this netfrontif
+ */
+static void netfrontif_exit(struct netif *netif)
+{
+    struct netfrontif *nfi = netif->state;
+
+    shutdown_netfront(nfi->dev);
+
+#ifndef CONFIG_LWIP_NOTHREADS
+    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_exit: wait for thread shutdown\n"));
+    nfi->_thread_exit = 1; /* request exit */
+    while (nfi->_thread_exit)
+        schedule();
+    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_exit: thread was shutdown\n"));
+#endif /* CONFIG_LWIP_NOTHREADS */
+
+    if (nfi->_state_is_private) {
+	mem_free(nfi);
+	netif->state = NULL;
+    }
+}
+#endif /* LWIP_NETIF_REMOVE_CALLBACK */
+
+/**
+ * Initializes and sets up a netfront interface for lwIP.
+ * This function should be passed as a parameter to netfrontif_add().
+ *
+ * @param netif
+ *  the lwip network interface structure for this netfrontif
+ * @return
+ *  ERR_OK if the interface was successfully initialized;
+ *  An err_t value otherwise
+ */
+err_t netfrontif_init(struct netif *netif)
+{
+    struct netfrontif *nfi;
+    static uint8_t netfrontif_id = 0;
+
+    LWIP_ASSERT("netif != NULL", (netif != NULL));
+
+    if (!(netif->state)) {
+	nfi = mem_calloc(1, sizeof(*nfi));
+	if (!nfi) {
+	    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_init: "
+				      "Could not allocate \n"));
+	    goto err_out;
+	}
+	netif->state = nfi;
+	nfi->_state_is_private = 1;
+	nfi->_dev_is_private = 1;
+	nfi->_hwaddr_is_private = 1;
+    } else {
+	nfi = netif->state;
+	nfi->_state_is_private = 0;
+	nfi->_dev_is_private = !(nfi->dev);
+	nfi->_hwaddr_is_private = eth_addr_cmp(&nfi->hwaddr, &ethzero);
+    }
+
+    /* Netfront */
+    if (nfi->_dev_is_private) {
+	/* user did not provide an opened netfront, we need to do it here */
+	if (!nfi->_state_is_private) {
+	    /* use vif_id to open an specific NIC interface */
+	    /* Note: netfront will duplicate the passed nodename */
+	    char nodename[128];
+
+	    snprintf(nodename, sizeof(nodename), "device/vif/%u", nfi->vif_id);
+	    nfi->dev = init_netfront(nodename, NULL, NULL, NULL);
+	} else {
+	    /* open the next available net interface */
+	    nfi->dev = init_netfront(NULL, NULL, NULL, NULL);
+	}
+	if (!nfi->dev) {
+	    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_init: "
+				      "Could not init netfront\n"));
+	    goto err_free_nfi;
+	}
+    }
+    netfront_set_rx_handler(nfi->dev, netfrontif_rx_handler, netif);
+
+    /* Interface identifier */
+    netif->name[0] = NETFRONTIF_NPREFIX;
+    netif->name[1] = '0' + netfrontif_id;
+    netfrontif_id++;
+
+    /* We directly use etharp_output() here to save a function call.
+     * Instead, there could be function declared that calls etharp_output()
+     * only if there is a link is available... */
+    netif->output = etharp_output;
+    netif->linkoutput = netfrontif_transmit;
+#if LWIP_NETIF_REMOVE_CALLBACK
+    netif->remove_callback = netfrontif_exit;
+#endif /* CONFIG_NETIF_REMOVE_CALLBACK */
+
+    /* Hardware address */
+    if (nfi->_hwaddr_is_private) {
+	if (!netfront_get_hwaddr(nfi->dev, &nfi->hwaddr)) {
+	    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_init: %c%c: "
+				      "Could not retrieve hardware address\n",
+				      netif->name[0], netif->name[1]));
+	    goto err_shutdown_netfront;
+	}
+    } else {
+	LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_init: %c%c: "
+				  "Overwriting hardware address\n",
+				  netif->name[0], netif->name[1]));
+    }
+    SMEMCPY(&netif->hwaddr, &nfi->hwaddr, ETHARP_HWADDR_LEN);
+    netif->hwaddr_len = ETHARP_HWADDR_LEN;
+    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_init: %c%c: hardware address: "
+			      "%02x:%02x:%02x:%02x:%02x:%02x\n",
+			      netif->name[0], netif->name[1],
+			      netif->hwaddr[0],
+			      netif->hwaddr[1],
+			      netif->hwaddr[2],
+			      netif->hwaddr[3],
+			      netif->hwaddr[4],
+			      netif->hwaddr[5]));
+
+    /* Initialize the snmp variables and counters inside the struct netif.
+     * The last argument is the link speed, in units of bits per second. */
+    NETIF_INIT_SNMP(netif, snmp_ifType_ethernet_csmacd, NETFRONTIF_SPEED);
+    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_init: %c%c: Link speed: %llu bps\n",
+			      netif->name[0], netif->name[1], NETFRONTIF_SPEED));
+
+    /* Device capabilities */
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP;
+
+    /* Maximum transfer unit */
+    netif->mtu = NETFRONTIF_MTU;
+    LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_init: %c%c: MTU: %u\n",
+			      netif->name[0], netif->name[1], netif->mtu));
+
+#if LWIP_NETIF_HOSTNAME
+    /* Initialize interface hostname */
+    if (!netif->hostname)
+	netif->hostname = NULL;
+#endif /* LWIP_NETIF_HOSTNAME */
+
+#ifndef CONFIG_LWIP_NOTHREADS
+  nfi->_thread_exit = 0;
+  nfi->_thread_name[0] = netif->name[0];
+  nfi->_thread_name[1] = netif->name[1];
+  nfi->_thread_name[2] = '-';
+  nfi->_thread_name[3] = 'r';
+  nfi->_thread_name[4] = 'x';
+  nfi->_thread_name[5] = '\0';
+  create_thread(nfi->_thread_name, netfrontif_thread, netif);
+#endif /* CONFIG_LWIP_NOTHREADS */
+
     return ERR_OK;
 
-#ifdef ETH_PAD_SIZE
-  pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
-#endif
-
-  /* Send the data from the pbuf to the interface, one pbuf at a
-     time. The size of the data in each pbuf is kept in the ->len
-     variable. */
-  if (!p->next) {
-    /* Only one fragment, can send it directly */
-      netfront_xmit(dev, p->payload, p->len);
-  } else {
-    unsigned char data[p->tot_len], *cur;
-    struct pbuf *q;
-
-    for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
-      memcpy(cur, q->payload, q->len);
-    netfront_xmit(dev, data, p->tot_len);
-  }
-
-#if ETH_PAD_SIZE
-  pbuf_header(p, ETH_PAD_SIZE);			/* reclaim the padding word */
-#endif
-  
-  LINK_STATS_INC(link.xmit);
-
-  return ERR_OK;
-}
-
-
-
-/*
- * netfront_output():
- *
- * This function is called by the TCP/IP stack when an IP packet
- * should be sent. It calls the function called low_level_output() to
- * do the actual transmission of the packet.
- *
- */
-
-static err_t
-netfront_output(struct netif *netif, struct pbuf *p,
-      struct ip_addr *ipaddr)
-{
-  
- /* resolve hardware address, then send (or queue) packet */
-  return etharp_output(netif, p, ipaddr);
- 
-}
-
-/*
- * netfront_input():
- *
- * This function should be called when a packet is ready to be read
- * from the interface. 
- *
- */
-
-static void
-netfront_input(struct netif *netif, unsigned char* data, int len)
-{
-  struct eth_hdr *ethhdr;
-  struct pbuf *p, *q;
-
-#if ETH_PAD_SIZE
-  len += ETH_PAD_SIZE; /* allow room for Ethernet padding */
-#endif
-  
-  /* move received packet into a new pbuf */
-  p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
-  if (p == NULL) {
-    LINK_STATS_INC(link.memerr);
-    LINK_STATS_INC(link.drop);
-    return;
-  }
-
-#if ETH_PAD_SIZE
-  pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
-#endif
-  
-  /* We iterate over the pbuf chain until we have read the entire
-   * packet into the pbuf. */
-  for(q = p; q != NULL && len > 0; q = q->next) {
-    /* Read enough bytes to fill this pbuf in the chain. The
-     * available data in the pbuf is given by the q->len
-     * variable. */
-    memcpy(q->payload, data, len < q->len ? len : q->len);
-    data += q->len;
-    len -= q->len;
-  }
-
-#if ETH_PAD_SIZE
-  pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
-#endif
-
-  LINK_STATS_INC(link.recv);
-
-  /* points to packet payload, which starts with an Ethernet header */
-  ethhdr = p->payload;
-    
-  switch (htons(ethhdr->type)) {
-  /* IP packet? */
-  case ETHTYPE_IP:
-#if 0
-/* CSi disabled ARP table update on ingress IP packets.
-   This seems to work but needs thorough testing. */
-    /* update ARP table */
-    etharp_ip_input(netif, p);
-#endif
-    /* skip Ethernet header */
-    pbuf_header(p, -(int16_t)sizeof(struct eth_hdr));
-    /* pass to network layer */
-    if (tcpip_input(p, netif) == ERR_MEM)
-      /* Could not store it, drop */
-      pbuf_free(p);
-    break;
-      
-  case ETHTYPE_ARP:
-    /* pass p to ARP module  */
-    etharp_arp_input(netif, (struct eth_addr *) netif->hwaddr, p);
-    break;
-
-  default:
-    pbuf_free(p);
-    p = NULL;
-    break;
-  }
-}
-
-
-/* 
- * netif_rx(): overrides the default netif_rx behaviour in the netfront driver.
- * 
- * Pull received packets into a pbuf queue for the low_level_input() 
- * function to pass up to lwIP.
- */
-
-void netif_rx(unsigned char* data, int len)
-{
-  if (the_interface != NULL) {
-    netfront_input(the_interface, data, len);
-    wake_up(&netfront_queue);
-  }
-  /* By returning, we ack the packet and relinquish the RX ring slot */
-}
-
-/*
- * Set the IP, mask and gateway of the IF
- */
-void networking_set_addr(struct ip_addr *ipaddr, struct ip_addr *netmask, struct ip_addr *gw)
-{
-  netif_set_ipaddr(the_interface, ipaddr);
-  netif_set_netmask(the_interface, netmask);
-  netif_set_gw(the_interface, gw);
-}
-
-
-static void
-arp_timer(void *arg)
-{
-  etharp_tmr();
-  sys_timeout(ARP_TMR_INTERVAL, arp_timer, NULL);
-}
-
-/*
- * netif_netfront_init():
- *
- * Should be called at the beginning of the program to set up the
- * network interface. It calls the function low_level_init() to do the
- * actual setup of the hardware.
- *
- */
-
-err_t
-netif_netfront_init(struct netif *netif)
-{
-  unsigned char *mac = netif->state;
-
-#if LWIP_SNMP
-  /* ifType ethernetCsmacd(6) @see RFC1213 */
-  netif->link_type = 6;
-  /* your link speed here */
-  netif->link_speed = ;
-  netif->ts = 0;
-  netif->ifinoctets = 0;
-  netif->ifinucastpkts = 0;
-  netif->ifinnucastpkts = 0;
-  netif->ifindiscards = 0;
-  netif->ifoutoctets = 0;
-  netif->ifoutucastpkts = 0;
-  netif->ifoutnucastpkts = 0;
-  netif->ifoutdiscards = 0;
-#endif
-  
-  netif->name[0] = IFNAME0;
-  netif->name[1] = IFNAME1;
-  netif->output = netfront_output;
-  netif->linkoutput = low_level_output;
-  
-  the_interface = netif;
-  
-  /* set MAC hardware address */
-  netif->hwaddr_len = 6;
-  netif->hwaddr[0] = mac[0];
-  netif->hwaddr[1] = mac[1];
-  netif->hwaddr[2] = mac[2];
-  netif->hwaddr[3] = mac[3];
-  netif->hwaddr[4] = mac[4];
-  netif->hwaddr[5] = mac[5];
-
-  /* No interesting per-interface state */
-  netif->state = NULL;
-
-  /* maximum transfer unit */
-  netif->mtu = 1500;
-  
-  /* broadcast capability */
-  netif->flags = NETIF_FLAG_BROADCAST;
-
-  etharp_init();
-
-  sys_timeout(ARP_TMR_INTERVAL, arp_timer, NULL);
-
-  return ERR_OK;
-}
-
-/*
- * Thread run by netfront: bring up the IP address and fire lwIP timers.
- */
-static __DECLARE_SEMAPHORE_GENERIC(tcpip_is_up, 0);
-static void tcpip_bringup_finished(void *p)
-{
-  tprintk("TCP/IP bringup ends.\n");
-  up(&tcpip_is_up);
-}
-
-/* 
- * Utility function to bring the whole lot up.  Call this from app_main() 
- * or similar -- it starts netfront and have lwIP start its thread,
- * which calls back to tcpip_bringup_finished(), which 
- * lets us know it's OK to continue.
- */
-void start_networking(void)
-{
-  struct netif *netif;
-  struct ip_addr ipaddr = { htonl(IF_IPADDR) };
-  struct ip_addr netmask = { htonl(IF_NETMASK) };
-  struct ip_addr gw = { 0 };
-  char *ip = NULL;
-
-  tprintk("Waiting for network.\n");
-
-  dev = init_netfront(NULL, NULL, rawmac, &ip);
-  
-  if (ip) {
-    ipaddr.addr = inet_addr(ip);
-    if (IN_CLASSA(ntohl(ipaddr.addr)))
-      netmask.addr = htonl(IN_CLASSA_NET);
-    else if (IN_CLASSB(ntohl(ipaddr.addr)))
-      netmask.addr = htonl(IN_CLASSB_NET);
-    else if (IN_CLASSC(ntohl(ipaddr.addr)))
-      netmask.addr = htonl(IN_CLASSC_NET);
-    else
-      tprintk("Strange IP %s, leaving netmask to 0.\n", ip);
-  }
-  tprintk("IP %x netmask %x gateway %x.\n",
-          ntohl(ipaddr.addr), ntohl(netmask.addr), ntohl(gw.addr));
-  
-  tprintk("TCP/IP bringup begins.\n");
-  
-  netif = xmalloc(struct netif);
-  tcpip_init(tcpip_bringup_finished, netif);
-    
-  netif_add(netif, &ipaddr, &netmask, &gw, rawmac, 
-            netif_netfront_init, ip_input);
-  netif_set_default(netif);
-  netif_set_up(netif);
-
-  down(&tcpip_is_up);
-
-  tprintk("Network is ready.\n");
-}
-
-/* Shut down the network */
-void stop_networking(void)
-{
-  if (dev)
-    shutdown_netfront(dev);
+err_shutdown_netfront:
+    shutdown_netfront(nfi->dev);
+err_free_nfi:
+    if (nfi->_state_is_private) {
+	mem_free(nfi);
+	netif->state = NULL;
+    }
+err_out:
+    return ERR_IF;
 }
