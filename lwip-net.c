@@ -70,6 +70,15 @@
  * Author: Adam Dunkels <adam@sics.se>
  *
  */
+/*
+ * Parts of this file are based on the previous lwip-net.c implementation:
+ *
+ * interface between lwIP's ethernet and Mini-os's netfront.
+ * For now, support only one network interface, as mini-os does.
+ *
+ * Tim Deegan <Tim.Deegan@eu.citrix.net>, July 2007
+ * based on lwIP's ethernetif.c skeleton file, copyrights as below.
+ */
 
 #include <lwip-net.h>
 #include "lwip/def.h"
@@ -462,3 +471,176 @@ err_free_nfi:
 err_out:
     return ERR_IF;
 }
+
+/* -------------------------------------------------------------------------- */
+
+#ifdef CONFIG_START_NETWORK
+#include <lwip/ip_addr.h>
+#include <lwip/inet.h>
+#include <netif/etharp.h>
+#include <lwip/tcpip.h>
+#include <lwip/init.h>
+#include <lwip/tcp.h>
+#include <lwip/netif.h>
+#include <lwip-net.h>
+#include <lwip/ip_frag.h>
+#include <lwip/tcp_impl.h>
+#include <lwip/dns.h>
+
+static struct netif *netif = NULL;
+
+void start_networking(void)
+{
+    struct netfront_dev *dev;
+    struct netif *_netif;
+    struct netif *niret;
+    struct netfrontif *nfi;
+    struct ip_addr ip;
+    struct ip_addr mask;
+    struct ip_addr gw;
+    char *ifip = NULL;
+
+    ASSERT(netif == NULL);
+    IP4_ADDR(&ip,   192, 168,   1, 128);
+    IP4_ADDR(&mask, 255, 255, 255,   0);
+    IP4_ADDR(&gw,     0,   0,   0,   0);
+
+    tprintk("Starting networking\n");
+
+    /* init netfront */
+    dev = init_netfront(NULL, NULL, NULL, &ifip);
+    if (!dev) {
+        tprintk("Could not init netfront\n");
+        goto err_out;
+    }
+    if (ifip) {
+        tprintk("Got IP address %s\n", ifip);
+
+        ip.addr = inet_addr(ifip);
+	if (IN_CLASSA(ntohl(ip.addr))) {
+	    tprintk("Use class A netmask (255.0.0.0)\n");
+	    mask.addr = htonl(IN_CLASSA_NET);
+	} else if (IN_CLASSB(ntohl(ip.addr))) {
+	    mask.addr = htonl(IN_CLASSB_NET);
+	    tprintk("Use class B netmask (255.255.0.0)\n");
+	} else if (IN_CLASSC(ntohl(ip.addr))) {
+	    mask.addr = htonl(IN_CLASSC_NET);
+	    tprintk("Use class C netmask (255.255.255.0)\n");
+	} else {
+	    tprintk("Could not auto-detect IP class for %s,"
+		    "use class C netmask (255.255.255.0)\n", ifip);
+	}
+    } else {
+        tprintk("Set IP to 192.168.1.128, use class A netmask (255.0.0.0)\n");
+    }
+
+    /* allocate netif */
+    _netif = mem_calloc(1, sizeof(*_netif));
+    if (!_netif) {
+        tprintk("Could not allocate netif\n");
+        goto err_shutdown_netfront;
+    }
+    /* allocate netif state data */
+    nfi = mem_calloc(1, sizeof(*nfi));
+    if (!nfi) {
+        tprintk("Could not allocate netfrontif\n");
+        goto err_free_netif;
+    }
+    nfi->dev = dev;
+
+    /* init lwIP */
+#ifdef CONFIG_LWIP_NOTHREADS
+    lwip_init();
+    niret = netif_add(_netif, &ip, &mask, &gw, nfi,
+                      netfrontif_init, ethernet_input);
+#else
+    tcpip_init(NULL, NULL);
+    niret = netif_add(_netif, &ip, &mask, &gw, nfi,
+                      netfrontif_init, tcpip_input);
+#endif
+    if (!niret) {
+        tprintk("Could not initialize lwIP\n");
+	goto err_free_nfi;
+    }
+    netif_set_default(_netif);
+    netif_set_up(_netif);
+
+    netif = _netif;
+    tprintk("Networking started\n");
+    return;
+
+ err_free_nfi:
+    mem_free(nfi);
+ err_free_netif:
+    mem_free(_netif);
+ err_shutdown_netfront:
+    shutdown_netfront(dev);
+ err_out:
+    return;
+}
+
+void stop_networking(void)
+{
+    struct netif *_netif = netif;
+    struct netfront_dev *dev;
+    struct netfrontif *nfi;
+
+    if (!_netif)
+        return;
+    netif = NULL;
+
+    tprintk("Stopping networking\n");
+
+    netif_set_down(_netif);
+    nfi = _netif->state;
+    dev = nfi->dev;
+    netif_remove(_netif);
+
+    mem_free(nfi);
+    mem_free(_netif);
+    shutdown_netfront(dev);
+
+    tprintk("Networking stopped\n");
+}
+
+#ifdef CONFIG_LWIP_NOTHREADS
+#define TIMED(ts_now, ts_tmr, interval, func)				\
+    do {								\
+        if (unlikely(((ts_now) - (ts_tmr)) > (interval))) {		\
+	    if ((ts_tmr))						\
+	      (func);							\
+	    (ts_tmr) = (ts_now);					\
+	}								\
+    } while(0)
+
+static uint64_t ts_tcp = 0;
+static uint64_t ts_etharp = 0;
+static uint64_t ts_ipreass = 0;
+static uint64_t ts_dns = 0;
+
+void poll_networking(void)
+{
+    uint64_t now;
+
+    if (!netif)
+        return;
+
+    /* poll interface */
+    netfrontif_poll(netif, LWIP_NETIF_MAX_RXBURST_LEN);
+
+    /* process lwIP timers */
+    now = NSEC_TO_MSEC(NOW());
+    TIMED(now, ts_etharp,  ARP_TMR_INTERVAL, etharp_tmr());
+    TIMED(now, ts_ipreass, IP_TMR_INTERVAL,  ip_reass_tmr());
+    TIMED(now, ts_tcp,     TCP_TMR_INTERVAL, tcp_tmr());
+    TIMED(now, ts_dns,     DNS_TMR_INTERVAL, dns_tmr());
+}
+#endif /* CONFIG_LWIP_NOTHREADS */
+
+void networking_set_addr(struct ip_addr *ipaddr, struct ip_addr *netmask, struct ip_addr *gw)
+{
+    netif_set_ipaddr(netif, ipaddr);
+    netif_set_netmask(netif, netmask);
+    netif_set_gw(netif, gw);
+}
+#endif /* CONFIG_START_NETWORK */
