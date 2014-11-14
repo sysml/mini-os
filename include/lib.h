@@ -144,6 +144,7 @@ enum fd_type {
     FTYPE_SAVEFILE,
     FTYPE_TPMFRONT,
     FTYPE_TPM_TIS,
+    FTYPE_PIPE,
 };
 
 LIST_HEAD(evtchn_port_list, evtchn_port_info);
