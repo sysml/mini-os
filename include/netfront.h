@@ -35,3 +35,7 @@ void poll_networking(void);
 void networking_set_addr(struct ip_addr *ipaddr, struct ip_addr *netmask, struct ip_addr *gw);
 #endif
 #endif
+
+#ifdef CONFIG_SELECT_POLL
+int netfront_get_fd(struct netfront_dev *dev);
+#endif

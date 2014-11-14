@@ -190,6 +190,9 @@ moretodo:
 	req->gref = buf->gref;
         req->id = id;
     }
+#ifdef CONFIG_SELECT_POLL
+    files[dev->fd].read = 0;
+#endif
 
     wmb();
 
@@ -258,6 +261,11 @@ void netfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
     network_tx_buf_gc(dev);
 
     local_irq_restore(flags);
+#ifdef CONFIG_SELECT_POLL
+    if (dev->fd != -1)
+        files[dev->fd].read = 1;
+    wake_up(&netfront_queue);
+#endif
 }
 
 #ifdef HAVE_LIBC
@@ -354,7 +362,7 @@ struct netfront_dev *init_netfront(char *_nodename, void (*thenetif_rx)(unsigned
     dev = malloc(sizeof(*dev));
     memset(dev, 0, sizeof(*dev));
     dev->nodename = strdup(nodename);
-#ifdef HAVE_LIBC
+#if defined(HAVE_LIBC) || defined(CONFIG_SELECT_POLL)
     dev->fd = -1;
 #endif
     dev->netif_rx = thenetif_rx;
@@ -397,7 +405,6 @@ out:
         *ip = malloc(strlen(ldev->ip) + 1);
         strncpy(*ip, ldev->ip, strlen(ldev->ip) + 1);
     }
-
 err:
     return dev;
 }
@@ -591,7 +598,10 @@ skip:
             &rawmac[3],
             &rawmac[4],
             &rawmac[5]);
-
+#ifdef CONFIG_SELECT_POLL
+    dev->fd = alloc_fd(FTYPE_TAP);
+    files[dev->fd].read = 0;
+#endif
     return dev;
 error:
     free(msg);
@@ -863,5 +873,12 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data, size_t l
     dev->len = 0;
 
     return dev->rlen;
+}
+#endif
+
+#ifdef CONFIG_SELECT_POLL
+int netfront_get_fd(struct netfront_dev *dev)
+{
+    return dev->fd;
 }
 #endif
