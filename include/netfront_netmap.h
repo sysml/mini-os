@@ -166,6 +166,10 @@ void netmap_netfront_rx(struct netfront_dev *dev)
 	}
 #endif
 
+#ifdef CONFIG_SELECT_POLL
+	files[dev->fd].read = 0;
+#endif
+
 	if (!stat->host_need_rxkick) {
 		return (rx);
 	}
@@ -254,7 +258,12 @@ void netfront_rx_interrupt(evtchn_port_t port, struct pt_regs *regs, void *data)
 	stat->host_need_rxkick = 1;
 	stat->guest_need_rxkick = 1;
 	rx_work_todo |= na->devid;
+#ifdef CONFIG_SELECT_POLL
+	wake_up(&netfront_queue);
+	files[dev->fd].read = 1;
+#else
 	wake_up(&rx_queue);
+#endif
 	local_irq_restore(flags);
 	mb();
 }
