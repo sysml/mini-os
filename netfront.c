@@ -568,6 +568,13 @@ again:
         }
     }
 
+	err = xenbus_printf(xbt, dev->nodename, "feature-rx-notify", "%u", 1);
+
+	if (err) {
+		message = "writing feature-rx-notify";
+		goto abort_transaction;
+	}
+
     err = xenbus_printf(xbt, dev->nodename, "request-rx-copy", "%u", 1);
 
     if (err) {
