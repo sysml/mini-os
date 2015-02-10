@@ -394,8 +394,8 @@ out:
         rawmac[5] = ldev->rawmac[5];
     }
     if (ip) {
-        *ip = malloc(strlen(ldev->ip));
-        strncpy(*ip, ldev->ip, strlen(ldev->ip));
+        *ip = malloc(strlen(ldev->ip) + 1);
+        strncpy(*ip, ldev->ip, strlen(ldev->ip) + 1);
     }
 
 err:
