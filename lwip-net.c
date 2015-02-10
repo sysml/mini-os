@@ -473,8 +473,7 @@ err_out:
 }
 
 /* -------------------------------------------------------------------------- */
-
-#ifdef CONFIG_START_NETWORK
+#if defined CONFIG_START_NETWORK || defined CONFIG_INCLUDE_START_NETWORK
 #include <lwip/ip_addr.h>
 #include <lwip/inet.h>
 #include <netif/etharp.h>
@@ -643,4 +642,4 @@ void networking_set_addr(struct ip_addr *ipaddr, struct ip_addr *netmask, struct
     netif_set_netmask(netif, netmask);
     netif_set_gw(netif, gw);
 }
-#endif /* CONFIG_START_NETWORK */
+#endif /* CONFIG_START_NETWORK || CONFIG_INCLUDE_START_NETWORK */
