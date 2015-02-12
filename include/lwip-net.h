@@ -85,4 +85,9 @@ struct netfrontif {
 
 err_t netfrontif_init(struct netif *netif);
 
+#ifdef CONFIG_SELECT_POLL
+#define netfrontif_fd(netif) \
+  netfront_get_fd(((struct netfrontif *) ((netif)->state))->dev)
+#endif
+
 #endif /* __LWIP_NET_H__ */
