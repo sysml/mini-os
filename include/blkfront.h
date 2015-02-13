@@ -2,6 +2,7 @@
 #include <xen/io/blkif.h>
 #include <mini-os/types.h>
 struct blkfront_dev;
+struct blk_buffer;
 struct blkfront_aiocb
 {
     struct blkfront_dev *aio_dev;
@@ -12,7 +13,11 @@ struct blkfront_aiocb
     uint8_t is_write;
     void *data;
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    struct blk_buffer *prst_buffer[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+#else
     grant_ref_t gref[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+#endif
     int n;
 
     void (*aio_cb)(struct blkfront_aiocb *aiocb, int ret);

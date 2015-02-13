@@ -33,11 +33,15 @@ DECLARE_WAIT_QUEUE_HEAD(blkfront_queue);
 
 #define BLK_RING_SIZE __RING_SIZE((struct blkif_sring *)0, PAGE_SIZE)
 #define GRANT_INVALID_REF 0
+#define BLK_BUFFER_PAGES_N BLK_RING_SIZE * BLKIF_MAX_SEGMENTS_PER_REQUEST
 
 
 struct blk_buffer {
     void* page;
     grant_ref_t gref;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    int inflight;
+#endif
 };
 
 struct blkfront_dev {
@@ -47,6 +51,9 @@ struct blkfront_dev {
     grant_ref_t ring_ref;
     evtchn_port_t evtchn;
     blkif_vdev_t handle;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    struct blk_buffer *pt_pool;
+#endif
 
     char *nodename;
     char *backend;
@@ -73,6 +80,18 @@ void blkfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 
 static void free_blkfront(struct blkfront_dev *dev)
 {
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+	int iter;
+	if (dev->pt_pool != NULL) {
+		for (iter = 0; iter < BLK_BUFFER_PAGES_N; iter++) {
+			if (dev->pt_pool[iter].inflight)
+				printk("gnttab_end_access %d -- %u\n", iter, dev->pt_pool[iter].gref);
+			gnttab_end_access(dev->pt_pool[iter].gref);
+			free_page(dev->pt_pool[iter].page);
+		}
+		free(dev->pt_pool);
+	}
+#endif
     mask_evtchn(dev->evtchn);
 
     free(dev->backend);
@@ -121,6 +140,20 @@ struct blkfront_dev *init_blkfront(char *_nodename, struct blkfront_info *info)
     SHARED_RING_INIT(s);
     FRONT_RING_INIT(&dev->ring, s, PAGE_SIZE);
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    int iter;
+    dev->pt_pool = xmalloc_array(struct blk_buffer, BLK_BUFFER_PAGES_N);
+    for (iter = 0; iter < BLK_BUFFER_PAGES_N; iter++) {
+        dev->pt_pool[iter].page = (char*)alloc_page();
+        *(char*)(dev->pt_pool[iter].page) = 0; /* Trigger CoW if needed */
+        barrier();
+        dev->pt_pool[iter].gref = gnttab_grant_access(dev->dom, virt_to_mfn(dev->pt_pool[iter].page), 0);
+        dev->pt_pool[iter].inflight = 0;
+    }
+    printk("persistent grants: %d pages allocated, %d KB overhead\n",
+           BLK_BUFFER_PAGES_N, (BLK_BUFFER_PAGES_N * (sizeof(struct blk_buffer) + PAGE_SIZE)) / 1024);
+#endif
+
     dev->ring_ref = gnttab_grant_access(dev->dom,virt_to_mfn(s),0);
 
     dev->events = NULL;
@@ -132,6 +165,13 @@ again:
         free(err);
     }
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    err = xenbus_printf(xbt, nodename, "feature-persistent", "%u", 1);
+    if (err) {
+        message = "writing feature-persistent";
+        goto abort_transaction;
+    }
+#endif
     err = xenbus_printf(xbt, nodename, "ring-ref","%u",
                 dev->ring_ref);
     if (err) {
@@ -225,6 +265,14 @@ done:
 
         snprintf(path, sizeof(path), "%s/sector-size", dev->backend);
         dev->info.sector_size = xenbus_read_integer(path);
+
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+        snprintf(path, sizeof(path), "%s/feature-persistent", dev->backend);
+        if (xenbus_read_integer(path) != 1) {
+            printk("backend does not support persistent grants\n");
+            goto error;
+        }
+#endif
 
         snprintf(path, sizeof(path), "%s/feature-barrier", dev->backend);
         dev->info.barrier = xenbus_read_integer(path);
@@ -339,6 +387,10 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
     RING_IDX i;
     int notify;
     int n, j;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    int p;
+#endif
+    uintptr_t data;
     uintptr_t start, end;
 
     // Can't io at non-sector-aligned location
@@ -372,8 +424,25 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
     }
     req->seg[0].first_sect = ((uintptr_t)aiocbp->aio_buf & ~PAGE_MASK) / 512;
     req->seg[n-1].last_sect = (((uintptr_t)aiocbp->aio_buf + aiocbp->aio_nbytes - 1) & ~PAGE_MASK) / 512;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    for (j = 0, p = ((i) % BLK_RING_SIZE) * BLKIF_MAX_SEGMENTS_PER_REQUEST;
+         j < n;
+         ++j, ++p) {
+        ASSERT(dev->pt_pool[p].inflight == 0);
+        aiocbp->prst_buffer[j] = &dev->pt_pool[p];
+        req->seg[j].gref = dev->pt_pool[p].gref;
+        dev->pt_pool[p].inflight = 1;
+        if (write) {
+            uintptr_t offset = (j == 0) ? ((uintptr_t)aiocbp->aio_buf & ~PAGE_MASK) & ~(uintptr_t)511 : 0;
+            size_t len = PAGE_SIZE - offset;
+
+            data = (uintptr_t)aiocbp->aio_buf + j * PAGE_SIZE;
+            memcpy((void *)((uintptr_t *)dev->pt_pool[p].page + offset), (void *) data, len);
+        }
+    }
+#else
     for (j = 0; j < n; j++) {
-	uintptr_t data = start + j * PAGE_SIZE;
+        data = start + j * PAGE_SIZE;
         if (!write) {
             /* Trigger CoW if needed */
             *(char*)(data + (req->seg[j].first_sect << 9)) = 0;
@@ -382,6 +451,7 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
 	aiocbp->gref[j] = req->seg[j].gref =
             gnttab_grant_access(dev->dom, virtual_to_mfn(data), write);
     }
+#endif
 
     dev->ring.req_prod_pvt = i + 1;
 
@@ -514,12 +584,43 @@ moretodo:
 
         switch (rsp->operation) {
         case BLKIF_OP_READ:
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+            {
+                size_t left    = aiocbp->aio_nbytes;
+                uintptr_t data = (uintptr_t)aiocbp->aio_buf;
+                struct blk_buffer *buffer;
+                int j = 0;
+                uintptr_t offset;
+                size_t len;
+                while (left) {
+                    buffer = aiocbp->prst_buffer[j];
+                    ASSERT(buffer->inflight == 1);
+
+                    offset = (j == 0) ? ((uintptr_t)aiocbp->aio_buf & ~PAGE_MASK) & ~(uintptr_t)511 : 0;
+                    len = PAGE_SIZE - offset;
+                    len = len > left ? left : len;
+                    memcpy((void *) data, (void *)((uintptr_t)buffer->page + offset), len);
+                    buffer->inflight = 0;
+                    data += len;
+                    left -= len;
+                    ++j;
+                }
+                ASSERT(j == aiocbp->n);
+            }
+            break;
+#endif
         case BLKIF_OP_WRITE:
         {
             int j;
 
             for (j = 0; j < aiocbp->n; j++)
+            {
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+                aiocbp->prst_buffer[j]->inflight = 0;
+#else
                 gnttab_end_access(aiocbp->gref[j]);
+#endif
+            }
 
             break;
         }
