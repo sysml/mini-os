@@ -129,7 +129,7 @@ CONFIG_CONSFRONT		?= n
 CONFIG_CONSFRONT_SYNC		?= n
 CONFIG_XENBUS			?= y
 CONFIG_XC				?= y
-CONFIG_LWIP				?= y
+CONFIG_LWIP				?= n
 CONFIG_SHUTDOWN			?= y
 CONFIG_PVH				?= y
 
@@ -146,8 +146,6 @@ MINIOS_OBJS0-y		:=	\
 	hypervisor.o		\
 	kernel.o			\
 	lock.o				\
-	lwip-arch.o			\
-	lwip-net.o			\
 	main.o				\
 	math.o				\
 	mm.o				\
@@ -159,6 +157,7 @@ MINIOS_OBJS0-y		:=	\
 	sys.o				\
 	xencons_ring.o		\
 	xmalloc.o
+MINIOS_OBJS0-$(CONFIG_LWIP)		+= lwip-arch.o lwip-net.o
 MINIOS_OBJS0-$(CONFIG_XENBUS)		+= xenbus.o
 MINIOS_OBJS0-$(CONFIG_XENBUS)		+= xs.o
 MINIOS_OBJS0-$(CONFIG_BLKFRONT)		+= blkfront.o
@@ -169,6 +168,7 @@ MINIOS_OBJS0-$(CONFIG_FBFRONT)		+= fbfront.o
 MINIOS_OBJS0-$(CONFIG_PCIFRONT)		+= pcifront.o
 MINIOS_OBJS0-$(CONFIG_CONSFRONT)	+= xencons_bus.o
 MINIOS_OBJS0-$(CONFIG_NETFRONT)		+= netfront.o
+MINIOS_OPT_FLAGS-$(CONFIG_LWIP)			+= -DCONFIG_LWIP
 MINIOS_OPT_FLAGS-$(CONFIG_START_NETWORK)	+= -DCONFIG_START_NETWORK
 MINIOS_OPT_FLAGS-$(CONFIG_SPARSE_BSS)		+= -DCONFIG_SPARSE_BSS
 MINIOS_OPT_FLAGS-$(CONFIG_QEMU_XS_ARGS)		+= -DCONFIG_QEMU_XS_ARGS
@@ -387,6 +387,8 @@ distclean-lwip:
 
 else
 
+CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip
+CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip/ipv4
 MINIOS_LWIP_LIB		:=
 MINIOS_LWIP_OBJS	:=
 
