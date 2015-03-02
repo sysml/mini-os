@@ -236,6 +236,9 @@ void lwip_free(void *ptr);
 #define TCP_WND_DEBUG LWIP_DBG_ON
 #define TCP_RST_DEBUG LWIP_DBG_ON
 #define TCP_QLEN_DEBUG LWIP_DBG_ON
+#if LWIP_CHECKSUM_ON_COPY
+#define TCP_CHECKSUM_ON_COPY_SANITY_CHECK 1
+#endif
 #endif /* LWIP_TCP_DEBUG */
 
 #ifdef LWIP_SYS_DEBUG
