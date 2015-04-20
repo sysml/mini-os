@@ -600,6 +600,25 @@ error:
     return NULL;
 }
 
+#ifdef HAVE_LWIP
+struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev,
+                                     struct eth_addr *out)
+{
+    if (sscanf(dev->mac,
+               "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &out->addr[0],
+               &out->addr[1],
+               &out->addr[2],
+               &out->addr[3],
+               &out->addr[4],
+               &out->addr[5]) == 6) {
+        return out;
+    }
+
+    return NULL;
+}
+#endif
+
 #ifdef HAVE_LIBC
 int netfront_tap_open(char *nodename) {
     struct netfront_dev *dev;

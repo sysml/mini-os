@@ -1,18 +1,22 @@
-/* 
+/*
  * lwip/arch/cc.h
  *
- * Compiler-specific types and macros for lwIP running on mini-os 
+ * Compiler-specific types and macros for lwIP running on mini-os
  *
  * Tim Deegan <Tim.Deegan@eu.citrix.net>, July 2007
+ * Simon Kuenzer <Simon.Kuenzer@neclab.eu>, October 2014
  */
 
 #ifndef __LWIP_ARCH_CC_H__
 #define __LWIP_ARCH_CC_H__
 
-/*   Typedefs for the types used by lwip - */
 #include <mini-os/os.h>
 #include <mini-os/types.h>
+#include <mini-os/lib.h>
 #include <time.h>
+#include <errno.h>
+
+/* Typedefs for the types used by lwip */
 typedef uint8_t  u8_t;
 typedef int8_t   s8_t;
 typedef uint16_t u16_t;
@@ -23,37 +27,16 @@ typedef uint64_t u64_t;
 typedef int64_t  s64_t;
 typedef uintptr_t mem_ptr_t;
 
-typedef uint16_t u_short;
+#include <inttypes.h>
+#define S16_F PRIi16
+#define U16_F PRIu16
+#define X16_F PRIx16
+#define S32_F PRIi32
+#define U32_F PRIu32
+#define X32_F PRIx32
+#define SZT_F "uz"
 
-/*   Compiler hints for packing lwip's structures - */
-#define PACK_STRUCT_FIELD(_x)  _x
-#define PACK_STRUCT_STRUCT     __attribute__ ((packed))
-#define PACK_STRUCT_BEGIN 
-#define PACK_STRUCT_END
-
-/*   Platform specific diagnostic output - */
-
-extern void lwip_printk(char *fmt, ...);
-#define LWIP_PLATFORM_DIAG(_x) do { lwip_printk _x ; } while (0)
-
-extern void lwip_die(char *fmt, ...);
-#define LWIP_PLATFORM_ASSERT(_x) do { lwip_die(_x); } while(0)
-
-/*   "lightweight" synchronization mechanisms - */
-/*     SYS_ARCH_DECL_PROTECT(x) - declare a protection state variable. */
-/*     SYS_ARCH_PROTECT(x)      - enter protection mode. */
-/*     SYS_ARCH_UNPROTECT(x)    - leave protection mode. */
-
-/*   If the compiler does not provide memset() this file must include a */
-/*   definition of it, or include a file which defines it. */
-#include <mini-os/lib.h>
-
-/*   This file must either include a system-local <errno.h> which defines */
-/*   the standard *nix error codes, or it should #define LWIP_PROVIDE_ERRNO */
-/*   to make lwip/arch.h define the codes which are used throughout. */
-#include <errno.h>
-
-/*   Not required by the docs, but needed for network-order calculations */
+/* byte-swapping */
 #ifdef HAVE_LIBC
 #include <machine/endian.h>
 #ifndef BIG_ENDIAN
@@ -63,25 +46,27 @@ extern void lwip_die(char *fmt, ...);
 #include <endian.h>
 #endif
 
-#include <inttypes.h>
-#define S16_F PRIi16
-#define U16_F PRIu16
-#define X16_F PRIx16
-#define S32_F PRIi32
-#define U32_F PRIu32
-#define X32_F PRIx32
+/* 32 bit checksum calculation */
+#define LWIP_CHKSUM_ALGORITHM 3
+#define ETH_PAD_SIZE 2
 
-#if 0
-#ifndef DBG_ON
-#define DBG_ON	LWIP_DBG_ON
-#endif
-#define LWIP_DEBUG	DBG_ON
-//#define IP_DEBUG	DBG_ON
-#define TCP_DEBUG	DBG_ON
-#define TCP_INPUT_DEBUG	DBG_ON
-#define TCP_QLEN_DEBUG	DBG_ON
-#define TCPIP_DEBUG	DBG_ON
-#define DBG_TYPES_ON	DBG_ON
-#endif
+/* rand */
+#define LWIP_RAND() ((u32_t)rand())
+
+/* compiler hints for packing lwip's structures */
+#define PACK_STRUCT_FIELD(_x)  _x
+#define PACK_STRUCT_STRUCT     __attribute__ ((packed))
+#define PACK_STRUCT_BEGIN
+#define PACK_STRUCT_END
+
+/* platform specific diagnostic output */
+#define LWIP_PLATFORM_DIAG(_x) do { printf("lwip: "); printf _x; } while (0)
+#define LWIP_PLATFORM_ASSERT(_x) do { printf("lwip: Assertion \"%s\" failed at line %d in %s\n", \
+                                             _x, __LINE__, __FILE__); fflush(stdout); BUG(); } while(0)
+
+/* lightweight synchronization mechanisms */
+#define SYS_ARCH_DECL_PROTECT(_x)  int (_x)
+#define SYS_ARCH_PROTECT(_x)       local_irq_save((_x))
+#define SYS_ARCH_UNPROTECT(_x)     local_irq_restore((_x))
 
 #endif /* __LWIP_ARCH_CC_H__ */
