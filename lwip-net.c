@@ -465,7 +465,10 @@ err_t netfrontif_init(struct netif *netif)
     return ERR_OK;
 
 err_shutdown_netfront:
-    shutdown_netfront(nfi->dev);
+    if (nfi->_dev_is_private) {
+        shutdown_netfront(nfi->dev);
+        nfi->dev = NULL;
+    }
 err_free_nfi:
     if (nfi->_state_is_private) {
 	mem_free(nfi);
