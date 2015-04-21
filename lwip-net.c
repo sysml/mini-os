@@ -315,8 +315,6 @@ static void netfrontif_exit(struct netif *netif)
 {
     struct netfrontif *nfi = netif->state;
 
-    shutdown_netfront(nfi->dev);
-
 #ifndef CONFIG_LWIP_NOTHREADS
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_exit: wait for thread shutdown\n"));
     nfi->_thread_exit = 1; /* request exit */
@@ -324,6 +322,11 @@ static void netfrontif_exit(struct netif *netif)
         schedule();
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_exit: thread was shutdown\n"));
 #endif /* CONFIG_LWIP_NOTHREADS */
+
+    if (nfi->_dev_is_private) {
+        shutdown_netfront(nfi->dev);
+        nfi->dev = NULL;
+    }
 
     if (nfi->_state_is_private) {
 	mem_free(nfi);
