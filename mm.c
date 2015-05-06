@@ -56,6 +56,7 @@
 
 static unsigned long *alloc_bitmap;
 static unsigned long alloc_bitmap_size;
+static unsigned long alloc_range;
 #define PAGES_PER_MAPWORD (sizeof(unsigned long) * 8)
 
 #define allocated_in_map(_pn) \
@@ -220,11 +221,12 @@ static void init_page_allocator(unsigned long min, unsigned long max)
     alloc_bitmap = (unsigned long *)to_virt(min);
     min         += bitmap_size;
     range        = max - min;
+    alloc_range  = range >> PAGE_SHIFT;
 
     /* All allocated by default. */
     memset(alloc_bitmap, ~0, bitmap_size);
     /* Free up the memory we've been given to play with. */
-    map_free(PHYS_PFN(min), range>>PAGE_SHIFT);
+    map_free(PHYS_PFN(min), alloc_range);
 
     /* The buddy lists are addressed in high memory. */
     min = (unsigned long) to_virt(min);
@@ -374,38 +376,29 @@ int free_physical_pages(xen_pfn_t *mfns, int n)
 }
 
 /*
- * The number of pages assigned to the
- * machine
+ * The number of pages handled by
+ * Mini-OS's memory management
  */
 unsigned long mm_total_pages(void)
 {
-    return alloc_bitmap_size << 3;
+    return alloc_range;
 }
 
 /*
- * The number of pages that are not used
- * by Mini-OS's memory management
- */
-unsigned long mm_reserved_pages(void)
-{
-    /* all pages before the bitmap are reserved */
-    return virt_to_pfn(alloc_bitmap);
-}
-
-/*
- * The number of pages that are still free
- * and can be used for allocations
+ * The number of pages that are free
+ * in Mini-OS's memory management
  */
 unsigned long mm_free_pages(void)
 {
-    unsigned long pages_res = mm_reserved_pages();
-    unsigned long pages = mm_total_pages() - pages_res;
+    unsigned long min = virt_to_pfn(alloc_bitmap) +
+                        (round_pgup(alloc_bitmap_size) >> PAGE_SHIFT);
+    unsigned long max = min + mm_total_pages();
     unsigned long sum = 0;
     unsigned long i;
 
-    for(i = 0; i < pages; i++)
-        if(!allocated_in_map(i + pages_res))
-	    sum++;
+    for(i = min; i < max; ++i)
+        if(!allocated_in_map(i))
+	    ++sum;
 
     return sum;
 }

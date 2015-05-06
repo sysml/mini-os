@@ -53,6 +53,7 @@ unsigned long *phys_to_machine_mapping;
 unsigned long mfn_zero;
 extern char stack[];
 extern void page_walk(unsigned long va);
+static unsigned long memory_size;
 
 /*
  * Make pt_pfn a new 'level' page table frame and hook it into the page
@@ -1023,6 +1024,7 @@ void arch_init_mm(unsigned long* start_pfn_p, unsigned long* max_pfn_p)
     start_pfn = PFN_UP(to_phys(start_info.pt_base)) + 
         start_info.nr_pt_frames + 3;
     max_pfn = start_info.nr_pages;
+    memory_size = start_info.nr_pages << PAGE_SHIFT;
 
     /* We need room for demand mapping and heap, clip available memory */
 #if defined(__i386__)
@@ -1042,6 +1044,11 @@ void arch_init_mm(unsigned long* start_pfn_p, unsigned long* max_pfn_p)
 
     *start_pfn_p = start_pfn;
     *max_pfn_p = max_pfn;
+}
+
+unsigned long arch_mem_size(void)
+{
+  return memory_size;
 }
 
 void arch_mm_pre_suspend(void)
