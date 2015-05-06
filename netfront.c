@@ -744,6 +744,7 @@ void suspend_netfront(void)
     struct netfront_dev_list *list;
 
     for (list = dev_list; list != NULL; list = list->next) {
+        netfront_clean_tx_ring(list->dev);
         _shutdown_netfront(list->dev);
     }
 }
@@ -755,6 +756,21 @@ void resume_netfront(void)
     for (list = dev_list; list != NULL; list = list->next) {
         _init_netfront(list->dev, NULL, NULL);
     }
+}
+
+void netfront_clean_tx_ring(struct netfront_dev *dev)
+{
+    struct semaphore *sem = &(dev->tx_sem);
+
+    unsigned long flags;
+    while (1) {
+        wait_event(sem->wait, sem->count == NET_TX_RING_SIZE);
+        local_irq_save(flags);
+        if (sem->count == NET_TX_RING_SIZE)
+            break;
+        local_irq_restore(flags);
+    }
+    local_irq_restore(flags);
 }
 
 void init_rx_buffers(struct netfront_dev *dev)
