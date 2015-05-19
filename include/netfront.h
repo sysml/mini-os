@@ -8,7 +8,11 @@ void netfront_rx(struct netfront_dev *dev);
 #define network_rx(dev) netfront_rx(dev);
 void netfront_set_rx_handler(struct netfront_dev *dev, void (*thenetif_rx)(unsigned char* data, int len, void *arg), void *arg);
 struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned char *data, int len, void *arg), unsigned char rawmac[6], char **ip);
-void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len);
+void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len);
+#ifdef HAVE_LWIP
+void netfront_set_rx_pbuf_handler(struct netfront_dev *dev, void (*thenetif_rx)(struct pbuf *p, void *arg), void *arg);
+void netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p);
+#endif
 void shutdown_netfront(struct netfront_dev *dev);
 void suspend_netfront(void);
 void resume_netfront(void);

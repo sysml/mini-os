@@ -118,8 +118,6 @@
 static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 {
     struct netfrontif *nfi = netif->state;
-    struct pbuf *q;
-    unsigned char *cur;
 
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: %c%c: "
 			      "Transmitting %u bytes\n",
@@ -134,12 +132,7 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
         /* fast case: no further buffer allocation needed */
         netfront_xmit(nfi->dev, (unsigned char *) p->payload, p->len);
     } else {
-        unsigned char data[p->tot_len];
-
-        for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
-            MEMCPY(cur, q->payload, q->len);
-
-        netfront_xmit(nfi->dev, data, p->tot_len);
+        netfront_xmit_pbuf(nfi->dev, p);
     }
 
 #if ETH_PAD_SIZE
@@ -148,45 +141,6 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 
     LINK_STATS_INC(link.xmit);
     return ERR_OK;
-}
-
-/**
- * Allocates a pbuf and copies data into it
- *
- * @param data
- *  the pointer to packet data to be copied into the pbuf
- * @param len
- *  the length of data in bytes
- * @return
- *  NULL when a pbuf could not be allocated; the pbuf otherwise
- */
-static inline struct pbuf *netfrontif_mkpbuf(unsigned char *data, int len)
-{
-    struct pbuf *p, *q;
-    unsigned char *cur;
-
-    p = pbuf_alloc(PBUF_RAW, len + ETH_PAD_SIZE, PBUF_POOL);
-    if (unlikely(!p))
-        return NULL;
-
-#if ETH_PAD_SIZE
-    pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
-#endif
-
-    if (likely(!p->next)) {
-        /* fast path */
-        MEMCPY(p->payload, data, len);
-    } else {
-        /* pbuf chain */
-        for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
-            MEMCPY(q->payload, cur, q->len);
-    }
-
-#if ETH_PAD_SIZE
-    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
-#endif
-
-    return p;
 }
 
 /**
@@ -254,22 +208,18 @@ static inline void netfrontif_input(struct pbuf *p, struct netif *netif)
 }
 
 /**
- * Callback to netfront that pushed a received packet to lwIP.
+ * Callback to netfront that pushed a received pbuf to lwIP.
  * Is is called by netfrontif_poll() for each received packet.
  *
- * @param data
+ * @param p
  *  the pointer to received packet data
- * @param len
- *  the length of data in bytes
  * @param argp
  *  pointer to netif
  */
-static void netfrontif_rx_handler(unsigned char *data, int len, void *argp)
+static void netfrontif_rx_handler(struct pbuf *p, void *argp)
 {
     struct netif *netif = argp;
-    struct pbuf *p;
 
-    p = netfrontif_mkpbuf(data, len);
     if (unlikely(!p)) {
         LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_rx_handler: %c%c: ERROR: "
 				  "Packet dropped: Out of pbufs\n",
@@ -409,7 +359,8 @@ err_t netfrontif_init(struct netif *netif)
 	    goto err_free_nfi;
 	}
     }
-    netfront_set_rx_handler(nfi->dev, netfrontif_rx_handler, netif);
+
+    netfront_set_rx_pbuf_handler(nfi->dev, netfrontif_rx_handler, netif);
 
     /* Interface identifier */
     netif->name[0] = NETFRONTIF_NPREFIX;
