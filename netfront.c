@@ -129,12 +129,12 @@ __attribute__((weak)) void netif_rx(unsigned char* data,int len,void* arg)
 __attribute__((weak)) void net_app_main(void*si, unsigned char*mac)
 {}
 
-static inline int xennet_rxidx(RING_IDX idx)
+static inline int netfront_rxidx(RING_IDX idx)
 {
 	return idx & (NET_RX_RING_SIZE - 1);
 }
 
-void network_rx(struct netfront_dev *dev)
+void netfront_rx(struct netfront_dev *dev)
 {
 	RING_IDX rp,cons,req_prod;
 	struct netif_rx_response *rx;
@@ -184,9 +184,13 @@ moretodo:
 					len = dev->len;
 				memcpy(dev->data, page+rx->offset, len);
 				dev->rlen = len;
-			} else
+				some = 1;
+				continue;
+			}
 #endif
-			dev->netif_rx(page+rx->offset,rx->status, dev->netif_rx_arg);
+			if (dev->netif_rx)
+				dev->netif_rx(page+rx->offset,rx->status, dev->netif_rx_arg);
+#endif
 			some = 1;
 		}
 	}
@@ -198,7 +202,7 @@ moretodo:
 	req_prod = dev->rx.req_prod_pvt;
 
 	for(i=0; i<nr_consumed; i++) {
-		int id = xennet_rxidx(req_prod + i);
+		int id = netfront_rxidx(req_prod + i);
 		netif_rx_request_t *req = RING_GET_REQUEST(&dev->rx, req_prod + i);
 		struct net_buffer* buf = &dev->rx_buffers[id];
 
@@ -216,7 +220,6 @@ moretodo:
 	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->rx, notify);
 	if (notify)
 		notify_remote_via_evtchn(dev->rx_evtchn);
-
 }
 
 void network_tx_buf_gc(struct netfront_dev *dev)
