@@ -906,9 +906,6 @@ error:
 	return NULL;
 }
 
-#ifdef HAVE_LWIP
-#endif
-
 void shutdown_netfront(struct netfront_dev *dev)
 {
 	struct netfront_dev_list *list = NULL;
@@ -955,9 +952,8 @@ static void _shutdown_netfront(struct netfront_dev *dev)
 	snprintf(path, sizeof(path), "%s/state", dev->backend);
 	snprintf(nodename, sizeof(nodename), "%s/state", dev->nodename);
 #ifdef CONFIG_NETMAP
-	if (dev->netmap) {
-			shutdown_netfront_netmap(dev);
-	}
+	if (dev->netmap)
+		shutdown_netfront_netmap(dev);
 #endif
 
 	if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateClosing)) != NULL) {
