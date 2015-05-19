@@ -126,7 +126,7 @@ __attribute__((weak)) void netif_rx(unsigned char* data,int len,void* arg)
 	printk("%d bytes incoming at %p\n", len, data);
 }
 
-__attribute__((weak)) void net_app_main(void*si,unsigned char*mac)
+__attribute__((weak)) void net_app_main(void*si, unsigned char*mac)
 {}
 
 static inline int xennet_rxidx(RING_IDX idx)
@@ -351,49 +351,6 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data,
 }
 #endif
 
-static void free_netfront(struct netfront_dev *dev)
-{
-	int i;
-	int separate_tx_rx_irq = (dev->tx_evtchn != dev->rx_evtchn);
-
-	free(dev->mac);
-	free(dev->backend);
-
-#ifdef CONFIG_NETMAP
-	if (dev->netmap)
-		return;
-#endif
-
-	for(i=0; i<NET_TX_RING_SIZE; i++)
-		down(&dev->tx_sem);
-
-	mask_evtchn(dev->tx_evtchn);
-	if (separate_tx_rx_irq)
-		mask_evtchn(dev->rx_evtchn);
-
-	gnttab_end_access(dev->rx_ring_ref);
-	gnttab_end_access(dev->tx_ring_ref);
-
-	free_page(dev->rx.sring);
-	free_page(dev->tx.sring);
-
-	unbind_evtchn(dev->tx_evtchn);
-	if (separate_tx_rx_irq)
-		unbind_evtchn(dev->rx_evtchn);
-
-	for(i=0; i<NET_RX_RING_SIZE; i++) {
-		gnttab_end_access(dev->rx_buffers[i].gref);
-		free_page(dev->rx_buffers[i].page);
-	}
-
-	for(i=0; i<NET_TX_RING_SIZE; i++) {
-		if (dev->tx_buffers[i].page) {
-			gnttab_end_access(dev->tx_buffers[i].gref);
-			free_page(dev->tx_buffers[i].page);
-		}
-	}
-}
-
 void netfront_set_rx_handler(struct netfront_dev *dev,
 			     void (*thenetif_rx)(unsigned char* data, int len,
 						 void *arg),
@@ -455,6 +412,49 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 	local_irq_save(flags);
 	network_tx_buf_gc(dev);
 	local_irq_restore(flags);
+}
+
+static void free_netfront(struct netfront_dev *dev)
+{
+	int i;
+	int separate_tx_rx_irq = (dev->tx_evtchn != dev->rx_evtchn);
+
+	free(dev->mac);
+	free(dev->backend);
+
+#ifdef CONFIG_NETMAP
+	if (dev->netmap)
+		return;
+#endif
+
+	for(i=0; i<NET_TX_RING_SIZE; i++)
+		down(&dev->tx_sem);
+
+	mask_evtchn(dev->tx_evtchn);
+	if (separate_tx_rx_irq)
+		mask_evtchn(dev->rx_evtchn);
+
+	gnttab_end_access(dev->rx_ring_ref);
+	gnttab_end_access(dev->tx_ring_ref);
+
+	free_page(dev->rx.sring);
+	free_page(dev->tx.sring);
+
+	unbind_evtchn(dev->tx_evtchn);
+	if (separate_tx_rx_irq)
+		unbind_evtchn(dev->rx_evtchn);
+
+	for(i=0; i<NET_RX_RING_SIZE; i++) {
+		gnttab_end_access(dev->rx_buffers[i].gref);
+		free_page(dev->rx_buffers[i].page);
+	}
+
+	for(i=0; i<NET_TX_RING_SIZE; i++) {
+		if (dev->tx_buffers[i].page) {
+			gnttab_end_access(dev->tx_buffers[i].gref);
+			free_page(dev->tx_buffers[i].page);
+		}
+	}
 }
 
 struct netfront_dev *init_netfront(char *_nodename,
