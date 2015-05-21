@@ -98,7 +98,7 @@ void lwip_free(void *ptr);
 /* PBUF pools */
 #if !defined CONFIG_LWIP_PBUF_NUM_RX || !CONFIG_LWIP_PBUF_NUM_RX
 #undef CONFIG_LWIP_PBUF_NUM_RX
-#define CONFIG_LWIP_PBUF_NUM_RX 256
+#define CONFIG_LWIP_PBUF_NUM_RX 512
 #endif
 #if !defined CONFIG_LWIP_PBUF_NUM_REF || !CONFIG_LWIP_PBUF_NUM_REF
 #undef CONFIG_LWIP_PBUF_NUM_REF
@@ -136,7 +136,7 @@ void lwip_free(void *ptr);
 #endif
 
 #define TCP_MSS 1460
-#define TCP_WND 65535 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
+#define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
 #if defined CONFIG_LWIP_WND_SCALE
 #define LWIP_WND_SCALE 1
 #else
@@ -248,6 +248,8 @@ void lwip_free(void *ptr);
 #define TCP_WND_DEBUG LWIP_DBG_ON
 #define TCP_RST_DEBUG LWIP_DBG_ON
 #define TCP_QLEN_DEBUG LWIP_DBG_ON
+//#define TCP_OUTPUT_DEBUG LWIP_DBG_ON
+//#define TCP_INPUT_DEBUG LWIP_DBG_ON
 #if LWIP_CHECKSUM_ON_COPY
 #define TCP_CHECKSUM_ON_COPY_SANITY_CHECK 1
 #endif

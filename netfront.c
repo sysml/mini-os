@@ -1,8 +1,9 @@
 /* Minimal network driver for Mini-OS.
  * Copyright (c) 2006-2007 Jacob Gorm Hansen, University of Copenhagen.
+ * Copyright (c) 2014-2015 Joao Martins, NEC Europe Ltd.
  * Based on netfront.c from Xen Linux.
  *
- * Does not handle fragments or extras.
+ * Does not handle fragments or extras for transmit.
  */
 #include <mini-os/os.h>
 #include <mini-os/xenbus.h>
@@ -15,6 +16,7 @@
 #include <mini-os/netfront.h>
 #include <mini-os/lib.h>
 #include <mini-os/semaphore.h>
+#include <xen/io/netif.h>
 #ifdef HAVE_LWIP
 #include "lwip/pbuf.h"
 #endif
@@ -23,6 +25,19 @@ DECLARE_WAIT_QUEUE_HEAD(netfront_queue);
 
 #ifdef HAVE_LIBC
 #define NETIF_SELECT_RX ((void*)-1)
+#endif
+
+#ifndef min
+#define min(a, b)						\
+    ({ __typeof__ (a) __a = (a);				\
+       __typeof__ (b) __b = (b);				\
+       __a < __b ? __a : __b; })
+#endif
+
+#define dprintk(format, ...)	do {} while(0)
+
+#ifndef dprintk
+#define dprintk(format, ...)	printk(format,##__VA_ARGS__)
 #endif
 
 #define NET_TX_RING_SIZE __CONST_RING_SIZE(netif_tx, PAGE_SIZE)
@@ -45,8 +60,20 @@ struct netfront_dev {
 
 	struct netif_tx_front_ring tx;
 	struct netif_rx_front_ring rx;
+
+	/* inflight response to be handled */
+	struct netif_rx_response rsp;
+	/* extras (if any) of the inflight buffer */
+	struct netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
+	/* inflight buffer */
+	struct pbuf *pbuf;
+	/* next available chunk */
+	struct pbuf *pbuf_cur;
+	uint32_t pbuf_off;
+
 	grant_ref_t tx_ring_ref;
 	grant_ref_t rx_ring_ref;
+
 	evtchn_port_t tx_evtchn;
 	evtchn_port_t rx_evtchn;
 
@@ -108,7 +135,20 @@ static inline unsigned short get_id_from_freelist(unsigned short* freelist)
 	return id;
 }
 
+__attribute__((weak)) void netif_rx(unsigned char* data,int len,void* arg)
+{
+	printk("%d bytes incoming at %p\n", len, data);
+}
+
+__attribute__((weak)) void net_app_main(void*si, unsigned char*mac)
+{}
+
 #ifdef HAVE_LWIP
+__attribute__((weak)) void netif_rx_pbuf(struct pbuf *p, void* arg)
+{
+	printk("%d bytes incoming at pbuf %p\n", p->len, p);
+}
+
 struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev,
 				     struct eth_addr *out)
 {
@@ -126,59 +166,228 @@ struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev,
 	return NULL;
 }
 
-__attribute__((weak)) void netif_rx_pbuf(struct pbuf *p, void* arg)
+static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *p_off,
+				  unsigned char *data, int32_t len)
 {
-	printk("%d bytes incoming at pbuf %p\n", p->len, p);
+	struct pbuf *q;
+	uint32_t q_ofs = *p_off;
+	unsigned char *cur = data;
+	int l = min(len, (*p)->len);
+
+	dprintk("rx: copy: pbuf %p ofs %d len %d p->len %d l %d\n",
+		*p, q_ofs, len, (*p)->len, l);
+
+	/* pbuf chain */
+	for(q = *p; q && len > 0; cur += l) {
+		l = min(len, q->len - q_ofs);
+		MEMCPY(q->payload + q_ofs, cur, l);
+
+		dprintk("rx: copy: pbuf %p ofs %d l %d\n", q, q_ofs, l);
+
+		len -= l;
+		q_ofs += l;
+		if (q_ofs >= q->len) {
+			q_ofs = 0;
+			q = q->next;
+		}
+	}
+
+	if (q) {
+		*p = q;
+		*p_off = q_ofs;
+	}
+}
+
+static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev,
+					       unsigned char *data, int32_t len,
+					       int32_t realsize, int pad)
+{
+	struct pbuf *p;
+
+	p = pbuf_alloc(PBUF_RAW, realsize + pad, PBUF_POOL);
+	if (unlikely(!p))
+		return NULL;
+
+#if ETH_PAD_SIZE
+	pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
+#endif
+
+	if (likely(!p->next)) {
+		/* fast path */
+		memcpy(p->payload, data, len);
+	} else {
+		dev->pbuf_cur = p;
+		dev->pbuf_off = 0;
+		pbuf_copy_bits(&dev->pbuf_cur, &dev->pbuf_off, data, len);
+	}
+
+#if ETH_PAD_SIZE
+	pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
+#endif
+	return p;
+}
+
+static void handle_pbuf(struct netfront_dev *dev,
+			struct netif_rx_response *rx,
+			struct net_buffer* buf, int32_t realsize)
+{
+	unsigned char* page = buf->page;
+	if (likely(!dev->pbuf)) { /* it's a paged pbuf */
+		dprintk("rx: handle: new: pbuf %d\n", realsize);
+		dev->pbuf = netfront_alloc_pbuf(dev, page+rx->offset, rx->status,
+						realsize, ETH_PAD_SIZE);
+
+		/* XXX TODO: Request refill */
+		BUG_ON(!dev->pbuf);
+	} else {
+		dprintk("rx: handle: copy: pbuf %d\n", rx->status);
+		pbuf_copy_bits(&dev->pbuf_cur, &dev->pbuf_off,
+			       page+rx->offset, rx->status);
+	}
 }
 #endif
 
-__attribute__((weak)) void netif_rx(unsigned char* data,int len,void* arg)
+static int handle_buffer(struct netfront_dev *dev,
+			 struct netif_rx_response *rx,
+			 struct net_buffer* buf, int32_t realsize)
 {
-	printk("%d bytes incoming at %p\n", len, data);
+	unsigned char* page = buf->page;
+
+#ifdef HAVE_LIBC
+	if (dev->netif_rx == NETIF_SELECT_RX) {
+		int len = rx->status;
+		ASSERT(current == main_thread);
+		if (len > dev->len)
+			len = dev->len;
+		memcpy(dev->data, page+rx->offset, len);
+		dev->rlen = len;
+		return 1;
+	}
+#endif
+
+	if (dev->netif_rx)
+		dev->netif_rx(page+rx->offset, rx->status, dev->netif_rx_arg);
+
+#ifdef HAVE_LWIP
+	if (dev->netif_rx_pbuf)
+		handle_pbuf(dev, rx, buf, realsize);
+#endif
+	return 1;
 }
 
-__attribute__((weak)) void net_app_main(void*si, unsigned char*mac)
-{}
 
 static inline int netfront_rxidx(RING_IDX idx)
 {
 	return idx & (NET_RX_RING_SIZE - 1);
 }
 
-static inline struct pbuf *netfront_mkpbuf(unsigned char *data, int len)
+static int netfront_get_size(struct netfront_dev *dev,
+				 RING_IDX ri)
 {
-    struct pbuf *p, *q;
-    unsigned char *cur;
+	struct netif_rx_response *rx;
+	int32_t len = 0;
+	int slots = 1;
 
-    p = pbuf_alloc(PBUF_RAW, len + ETH_PAD_SIZE, PBUF_POOL);
-    if (unlikely(!p))
-        return NULL;
+	do {
+		rx = RING_GET_RESPONSE(&dev->rx, ++ri);
+		dprintk("rx: scan: slot %d len %d (more %s)\n",
+			slots, rx->status,
+			(rx->flags & NETRXF_more_data
+				? "true": "false"));
+		len += rx->status;
+		slots++;
+	} while (rx->flags & NETRXF_more_data);
 
-#if ETH_PAD_SIZE
-    pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
-#endif
+	return len;
+}
 
-    if (likely(!p->next)) {
-        /* fast path */
-        memcpy(p->payload, data, len);
-    } else {
-        /* pbuf chain */
-        for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
-            memcpy(q->payload, cur, q->len);
-    }
+static int netfront_get_extras(struct netfront_dev *dev,
+			       struct netif_extra_info *extras,
+			       RING_IDX ri)
+{
+	struct netif_extra_info *extra;
+	RING_IDX cons = dev->rx.rsp_cons;
+	int err = 0;
 
-#if ETH_PAD_SIZE
-    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
-#endif
+	do {
+		extra = (struct netif_extra_info *)
+			RING_GET_RESPONSE(&dev->rx, ++cons);
 
-    return p;
+		if (unlikely(!extra->type ||
+			     extra->type >= XEN_NETIF_EXTRA_TYPE_MAX)) {
+			printk("Invalid extra type: %d\n", extra->type);
+			err = -EINVAL;
+		} else {
+			dprintk("rx: scan: extra %u %s\n", extra->type,
+				(extra->flags & XEN_NETIF_EXTRA_FLAG_MORE
+					? "(more true)": ""));
+			memcpy(&extras[extra->type - 1], extra,
+			       sizeof(*extra));
+		}
+	} while (extra->flags & XEN_NETIF_EXTRA_FLAG_MORE);
+
+	dev->rx.rsp_cons = cons;
+	return err;
+}
+
+static int netfront_get_responses(struct netfront_dev *dev,
+				  RING_IDX rp)
+{
+	struct netif_rx_response *rsp = &(dev->rsp);
+	int32_t realsize = rsp->status;
+	int16_t size = rsp->status;
+	uint16_t id = rsp->id;
+	uint16_t flags = rsp->flags;
+	RING_IDX cons = rp;
+	int16_t slots = 1;
+
+	dprintk("rx: ring: len %d %s\n", size,
+		(flags & NETRXF_more_data ? "(more true) ": ""));
+
+	BUG_ON(id >= NET_TX_RING_SIZE);
+
+	if (flags & NETRXF_extra_info) {
+		memset(dev->extras, 0, sizeof(dev->extras));
+		netfront_get_extras(dev, dev->extras, cons);
+		cons = dev->rx.rsp_cons;
+	}
+
+	if (flags & NETRXF_more_data) {
+		dprintk("rx: scan: slot 0 len %d %s\n",
+			size, (flags & NETRXF_more_data ? "(more true)": ""));
+		realsize = size + netfront_get_size(dev, cons);
+	}
+
+	for (;;) {
+		if (rsp->status < 0 || (rsp->offset + rsp->status > PAGE_SIZE))
+			printk("rx: ring: rx->offset %d, size %d\n",
+				rsp->offset, size);
+		else
+			handle_buffer(dev, rsp, &dev->rx_buffers[id], realsize);
+
+		if (!(flags & NETRXF_more_data))
+			break;
+
+		rsp = RING_GET_RESPONSE(&dev->rx, cons + slots);
+		id = rsp->id;
+		size = rsp->status;
+		flags = rsp->flags;
+		slots++;
+
+		dprintk("rx: ring: len %d %s\n", size,
+			(flags & NETRXF_more_data ? "(more true) ": ""));
+	}
+
+	dev->rx.rsp_cons = cons + slots;
+	return 1;
 }
 
 void netfront_rx(struct netfront_dev *dev)
 {
-	RING_IDX rp,cons,req_prod;
-	struct netif_rx_response *rx;
-	int nr_consumed, some, more, i, notify;
+	RING_IDX rp, cons, prod;
+	struct netif_rx_response *rsp = &(dev->rsp);
+	struct netif_rx_request *req;
+	int more, notify;
 
 #ifdef CONFIG_NETMAP
 	if (dev->netmap) {
@@ -191,80 +400,45 @@ moretodo:
 	rmb(); /* Ensure we see queued responses up to 'rp'. */
 	cons = dev->rx.rsp_cons;
 
-	for (nr_consumed = 0, some = 0;
-	     cons != rp;
-	     nr_consumed++, cons++)
-	{
-		struct net_buffer* buf;
-		unsigned char* page;
-		int id;
+	while (cons != rp) {
+		memcpy(rsp, RING_GET_RESPONSE(&dev->rx, cons), sizeof(*rsp));
+		netfront_get_responses(dev, cons);
 
-		rx = RING_GET_RESPONSE(&dev->rx, cons);
-
-		if (rx->flags & NETRXF_extra_info) {
-			printk("+++++++++++++++++++++ we have extras!\n");
-			continue;
-		}
-
-		if (rx->status == NETIF_RSP_NULL)
-			continue;
-
-		id = rx->id;
-		BUG_ON(id >= NET_TX_RING_SIZE);
-
-		buf = &dev->rx_buffers[id];
-		page = (unsigned char*)buf->page;
-
-		if(rx->status > 0) {
-#ifdef HAVE_LIBC
-			if (dev->netif_rx == NETIF_SELECT_RX) {
-				int len = rx->status;
-				ASSERT(current == main_thread);
-				if (len > dev->len)
-					len = dev->len;
-				memcpy(dev->data, page+rx->offset, len);
-				dev->rlen = len;
-				some = 1;
-				continue;
-			}
-#endif
-			if (dev->netif_rx)
-				dev->netif_rx(page+rx->offset,rx->status, dev->netif_rx_arg);
 #ifdef HAVE_LWIP
-			if (dev->netif_rx_pbuf) {
-				struct pbuf* p;
-
-				p = netfront_mkpbuf(page+rx->offset, rx->status);
-				dev->netif_rx_pbuf(p, dev->netif_rx_arg);
-			}
-#endif
-			some = 1;
+		if (dev->pbuf) {
+			dprintk("rx: handle: netif: pbuf %u\n", dev->pbuf->tot_len);
+			dev->netif_rx_pbuf(dev->pbuf, dev->netif_rx_arg);
+			dev->pbuf = NULL;
+			dev->pbuf_cur = NULL;
+			dev->pbuf_off = 0;
 		}
-	}
-	dev->rx.rsp_cons=cons;
-
-	RING_FINAL_CHECK_FOR_RESPONSES(&dev->rx,more);
-	if(more && !some)
-		goto moretodo;
-	req_prod = dev->rx.req_prod_pvt;
-
-	for(i=0; i<nr_consumed; i++) {
-		int id = netfront_rxidx(req_prod + i);
-		netif_rx_request_t *req = RING_GET_REQUEST(&dev->rx, req_prod + i);
-		struct net_buffer* buf = &dev->rx_buffers[id];
-
-		req->gref = buf->gref;
-		req->id = id;
-	}
-
-#ifdef CONFIG_SELECT_POLL
-    files[dev->fd].read = 0;
 #endif
+
+		cons = dev->rx.rsp_cons;
+	}
+
+	dev->rx.rsp_cons = cons;
+	RING_FINAL_CHECK_FOR_RESPONSES(&dev->rx, more);
+	if(more)
+		goto moretodo;
+
+	for (prod = dev->rx.req_prod_pvt;
+	     prod - dev->rx.rsp_cons < NET_RX_RING_SIZE;
+	     prod++) {
+		uint16_t id = netfront_rxidx(prod);
+		grant_ref_t ref = dev->rx_buffers[id].gref;
+
+		req = RING_GET_REQUEST(&dev->rx, prod);
+		req->id = id;
+		req->gref = ref;
+	}
+
+	dev->rx.req_prod_pvt = prod;
 	wmb();
-
-	dev->rx.req_prod_pvt = req_prod + i;
-
 	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->rx, notify);
+#ifdef CONFIG_SELECT_POLL
+	files[dev->fd].read = 0;
+#endif
 	if (notify)
 		notify_remote_via_evtchn(dev->rx_evtchn);
 }
@@ -401,18 +575,6 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data,
 }
 #endif
 
-void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
-				  void (*thenetif_rx)(struct pbuf *p, void *arg),
-				  void *arg)
-{
-	if (dev->netif_rx_pbuf && dev->netif_rx_pbuf != netif_rx_pbuf)
-		printk("Replacing netif_rx_pbuf handler for dev %s\n", dev->nodename);
-
-	dev->netif_rx = NULL;
-	dev->netif_rx_pbuf = thenetif_rx;
-	dev->netif_rx_arg = arg;
-}
-
 void netfront_set_rx_handler(struct netfront_dev *dev,
 			     void (*thenetif_rx)(unsigned char* data, int len,
 						 void *arg),
@@ -464,6 +626,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 #endif
 
 	BUG_ON(len > PAGE_SIZE);
+	dprintk("tx: raw %d\n", len);
 
 	tx = netfront_get_page(dev);
 	page = dev->tx_buffers[tx->id].page;
@@ -482,6 +645,17 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 }
 
 #ifdef HAVE_LWIP
+void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
+				  void (*thenetif_rx)(struct pbuf *p, void *arg),
+				  void *arg)
+{
+	if (dev->netif_rx_pbuf && dev->netif_rx_pbuf != netif_rx_pbuf)
+		printk("Replacing netif_rx_pbuf handler for dev %s\n", dev->nodename);
+
+	dev->netif_rx = NULL;
+	dev->netif_rx_pbuf = thenetif_rx;
+	dev->netif_rx_arg = arg;
+}
 
 void netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 {
@@ -492,6 +666,8 @@ void netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	int notify;
 	int offset = 0;
 	int tot, len;
+
+	dprintk("tx: pbuf %d\n", p->tot_len);
 
 	for(q = p; q != NULL; q = q->next) {
 		len = q->len;
