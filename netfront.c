@@ -655,6 +655,11 @@ void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
 	dev->netif_rx = NULL;
 	dev->netif_rx_pbuf = thenetif_rx;
 	dev->netif_rx_arg = arg;
+
+	/* Reset runtime state*/
+	dev->pbuf = NULL;
+	dev->pbuf_cur = NULL;
+	dev->pbuf_off = 0;
 }
 
 void netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
@@ -975,12 +980,14 @@ again:
 		goto abort_transaction;
 	}
 
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	err = xenbus_printf(xbt, dev->nodename, "feature-persistent", "%u", 1);
 
 	if (err) {
 		message = "writing feature-persistent";
 		goto abort_transaction;
 	}
+#endif
 
 	err = xenbus_printf(xbt, dev->nodename, "request-rx-copy", "%u", 1);
 
@@ -988,6 +995,22 @@ again:
 		message = "writing request-rx-copy";
 		goto abort_transaction;
 	}
+
+#if defined(CONFIG_NETFRONT_GSO) && defined(HAVE_LWIP)
+	err = xenbus_printf(xbt, dev->nodename, "feature-sg", "%u", 1);
+
+	if (err) {
+		message = "writing feature-sg";
+		goto abort_transaction;
+	}
+
+	err = xenbus_printf(xbt, dev->nodename, "feature-gso-tcpv4", "%u", 1);
+
+	if (err) {
+		message = "writing feature-gso-tcpv4";
+		goto abort_transaction;
+	}
+#endif
 
 	snprintf(path, sizeof(path), "%s/state", dev->nodename);
 	err = xenbus_switch_state(xbt, path, XenbusStateConnected);
