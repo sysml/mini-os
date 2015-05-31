@@ -227,9 +227,9 @@ static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev,
 	return p;
 }
 
-static void handle_pbuf(struct netfront_dev *dev,
-			struct netif_rx_response *rx,
-			struct net_buffer* buf, int32_t realsize)
+static inline void handle_pbuf(struct netfront_dev *dev,
+			       struct netif_rx_response *rx,
+			       struct net_buffer* buf, int32_t realsize)
 {
 	unsigned char* page = buf->page;
 	if (likely(!dev->pbuf)) { /* it's a paged pbuf */
@@ -247,9 +247,9 @@ static void handle_pbuf(struct netfront_dev *dev,
 }
 #endif
 
-static int handle_buffer(struct netfront_dev *dev,
-			 struct netif_rx_response *rx,
-			 struct net_buffer* buf, int32_t realsize)
+static inline int handle_buffer(struct netfront_dev *dev,
+				struct netif_rx_response *rx,
+				struct net_buffer* buf, int32_t realsize)
 {
 	unsigned char* page = buf->page;
 
