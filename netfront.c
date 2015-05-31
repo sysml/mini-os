@@ -339,7 +339,7 @@ static int netfront_get_responses(struct netfront_dev *dev,
 	uint16_t id = rsp->id;
 	uint16_t flags = rsp->flags;
 	RING_IDX cons = rp;
-	int16_t slots = 1;
+	uint16_t slots = 1;
 
 	dprintk("rx: ring: len %d %s\n", size,
 		(flags & NETRXF_more_data ? "(more true) ": ""));
@@ -359,7 +359,8 @@ static int netfront_get_responses(struct netfront_dev *dev,
 	}
 
 	for (;;) {
-		if (rsp->status < 0 || (rsp->offset + rsp->status > PAGE_SIZE))
+		if (unlikely(rsp->status < 0 ||
+			     (rsp->offset + rsp->status > PAGE_SIZE)))
 			printk("rx: ring: rx->offset %d, size %d\n",
 				rsp->offset, size);
 		else
@@ -387,7 +388,8 @@ void netfront_rx(struct netfront_dev *dev)
 	RING_IDX rp, cons, prod;
 	struct netif_rx_response *rsp = &(dev->rsp);
 	struct netif_rx_request *req;
-	int more, notify;
+	int notify;
+	int more;
 
 #ifdef CONFIG_NETMAP
 	if (dev->netmap) {
@@ -465,7 +467,7 @@ void netfront_tx_buf_gc(struct netfront_dev *dev)
 			id  = txrsp->id;
 			BUG_ON(id >= NET_TX_RING_SIZE);
 
-			add_id_to_freelist(id,dev->tx_freelist);
+			add_id_to_freelist(id, dev->tx_freelist);
 			up(&dev->tx_sem);
 		}
 
@@ -636,10 +638,10 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 
 	tx = RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
 	tx->gref = buf->gref;
-	tx->offset=0;
-	tx->size=0;
-	tx->flags=0;
+	tx->offset = 0;
+	tx->size = 0;
 	tx->id = id;
+	tx->flags = 0;
 	return tx;
 }
 
@@ -669,8 +671,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 
 	wmb();
 	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
-
-	if(notify)
+	if (notify)
 		notify_remote_via_evtchn(dev->tx_evtchn);
 
 	dprintk("tx: raw %d\n", len);
