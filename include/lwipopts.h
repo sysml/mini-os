@@ -135,14 +135,25 @@ void lwip_free(void *ptr);
 #define CONFIG_LWIP_NUM_TCPCON 512
 #endif
 
+#define TCP_CALCULATE_EFF_SEND_MSS 1
+#define IP_FRAG 0
 #define TCP_MSS 1460
 #define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
+
 #if defined CONFIG_LWIP_WND_SCALE
 #define LWIP_WND_SCALE 1
 #else
 #define LWIP_WND_SCALE 0
 #endif
 #if LWIP_WND_SCALE
+/*
+ * Maximum window and scaling factor
+ * Optimal settings for RX performance are:
+ * 	TCP_WND		262143
+ * 	TCP_RCV_SCALE	5
+ */
+#undef TCP_WND
+#define TCP_WND 262142
 #if defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1
 #define TCP_RCV_SCALE CONFIG_LWIP_WND_SCALE_FACTOR /* scaling factor 0..14 */
 #else
@@ -152,12 +163,13 @@ void lwip_free(void *ptr);
 #else
 #define TCP_SND_BUF (TCP_WND * 2)
 #endif
+
 #define TCP_SND_QUEUELEN (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_QUEUE_OOSEQ 1
-#define MEMP_NUM_TCP_SEG CONFIG_LWIP_PBUF_NUM_REF
+#define MEMP_NUM_TCP_SEG TCP_SND_QUEUELEN
 #define MEMP_NUM_FRAG_PBUF 32
 #define LWIP_TCP_TIMESTAMPS 0
-#define TCP_OVERSIZE TCP_MSS
+#define TCP_OVERSIZE 0
 #define LWIP_TCP_KEEPALIVE 1
 
 #define MEMP_NUM_TCP_PCB CONFIG_LWIP_NUM_TCPCON /* max num of sim. TCP connections */
