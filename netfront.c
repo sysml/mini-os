@@ -19,6 +19,7 @@
 #include <xen/io/netif.h>
 #ifdef HAVE_LWIP
 #include "lwip/pbuf.h"
+#include <lwip/stats.h>
 #endif
 
 DECLARE_WAIT_QUEUE_HEAD(netfront_queue);
@@ -462,7 +463,7 @@ void netfront_tx_buf_gc(struct netfront_dev *dev)
 				continue;
 
 			if (txrsp->status == NETIF_RSP_ERROR)
-				printk("packet error\n");
+				printk("tx: error");
 
 			id  = txrsp->id;
 			BUG_ON(id >= NET_TX_RING_SIZE);
@@ -594,17 +595,12 @@ void netfront_set_rx_handler(struct netfront_dev *dev,
 #define IPPROTO_TCP     6
 #define get_ipproto(x) (((unsigned char *)(x))[9])
 
-static inline void netfront_set_tx_flags(struct netif_tx_request *tx,
-					 void *page, int slot)
+static inline void netfront_set_tx_flags(struct netif_tx_request *tx, void *page)
 {
 	struct eth_hdr *ethhdr;
 
 	page -= ETH_PAD_SIZE;
 	ethhdr = page;
-
-	/**/
-	if (slot)
-		return;
 
 	switch (PP_HTONS(ethhdr->type)) {
 		/* IP or ARP packet? */
@@ -621,8 +617,7 @@ static inline void netfront_set_tx_flags(struct netif_tx_request *tx,
 }
 #endif
 
-static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *dev,
-							 int slot)
+static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *dev)
 {
 	struct netif_tx_request *tx;
 	unsigned short id;
@@ -645,6 +640,25 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 	return tx;
 }
 
+static inline void netfront_set_extras(struct netfront_dev *dev)
+{
+	struct netif_extra_info *gso;
+
+	gso = (struct netif_extra_info *)
+		RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
+
+	gso->u.gso.size = TCP_MSS;
+	// TODO: IPv6
+	gso->u.gso.type = XEN_NETIF_GSO_TYPE_TCPV4;
+	gso->u.gso.pad = 0;
+	gso->u.gso.features = 0;
+
+	gso->type = XEN_NETIF_EXTRA_TYPE_GSO;
+	gso->flags = 0;
+
+	dprintk("tx: gso: size %u\n", TCP_MSS);
+}
+
 void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 {
 	int notify;
@@ -661,11 +675,11 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 
 	BUG_ON(len > PAGE_SIZE);
 
-	tx = netfront_get_page(dev, 0);
+	tx = netfront_get_page(dev);
 	page = dev->tx_buffers[tx->id].page;
 	memcpy(page, data, len);
 #ifdef CONFIG_LWIP_CHECKSUM_NOGEN
-	netfront_set_tx_flags(tx, page, 0);
+	netfront_set_tx_flags(tx, page);
 #endif
 	tx->size = len;
 
@@ -699,46 +713,90 @@ void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
 	dev->pbuf_off = 0;
 }
 
-static inline void netfront_make_txreqs(struct netfront_dev *dev, struct pbuf *p)
+static inline int netfront_count_pbuf_slots(struct netfront_dev *dev,
+					    struct pbuf *p)
 {
-	struct pbuf *q = p;
-	struct netif_tx_request *tx;
-	void* page;
-	int slot = 0;
-	int offset = 0;
-	int len, size;
+	int slots = p->tot_len/PAGE_SIZE;
+	return (slots > 1 ? slots + 1 : 1);
+}
 
-	len = p->tot_len;
+static struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
+						     struct netif_tx_request *tx,
+						     struct pbuf *p, int *slots)
+{
+	void *page = dev->tx_buffers[tx->id].page;
+	unsigned offset = tx->size;
+	unsigned q_ofs = 0;
+	unsigned len = p->len;
+	unsigned size = min(p->len, (PAGE_SIZE - offset));
+
+	dprintk("tx: make: p->len %u size %u offset %u\n",
+				p->len, size, offset);
 	while(len > 0) {
-		size = q->len;
-
-		if (unlikely(!offset || (offset + size > PAGE_SIZE))) {
+		if (unlikely(!size || (offset + size > PAGE_SIZE))) {
 			offset = 0;
-			tx = netfront_get_page(dev, slot++);
+			tx->flags |= NETTXF_more_data;
+			tx = netfront_get_page(dev);
 			page = dev->tx_buffers[tx->id].page;
+			(*slots)++;
 		}
 
-		MEMCPY(page, q->payload, size);
-#ifdef CONFIG_LWIP_CHECKSUM_NOGEN
-		netfront_set_tx_flags(tx, page, 0);
-#endif
+		size = min(PAGE_SIZE - offset, len);
+
+		dprintk("tx: make: size %u len %u offset %u q_offset %u id %u\n",
+				size, len, offset, q_ofs, tx->id);
+
+		MEMCPY(page + offset, p->payload + q_ofs, size);
 		tx->size += size;
 
 		len -= size;
 		offset += size;
 		page += size;
-		q = q->next;
+		q_ofs += size;
 	}
+
+	return tx;
 }
 
-void netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
+err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 {
-	int slots = p->tot_len/PAGE_SIZE+1;
-	int gso_size = slots > 1 ? TCP_MSS : 0;
+	struct netif_tx_request *first_tx, *tx;
+	void *page;
+	int slots;
+	int used = 0;
 	int notify, flags;
+	struct pbuf *q;
 
-	dprintk("tx: pbuf %d (slots %d)\n", p->tot_len, slots);
-	netfront_make_txreqs(dev, p);
+	slots = netfront_count_pbuf_slots(dev, p);
+	rmb();
+	if (slots > (NET_TX_RING_SIZE -
+	    (dev->tx.req_prod_pvt - dev->tx.rsp_cons))) {
+		printk("tx: pbuf %d slots, too big for wire\n",
+			slots);
+		LINK_STATS_INC(link.memerr);
+		return ERR_BUF;
+	}
+
+	first_tx = netfront_get_page(dev);
+	page = dev->tx_buffers[first_tx->id].page;
+
+	if (slots > 1) {
+		first_tx->flags |= NETTXF_extra_info;
+		netfront_set_extras(dev);
+		used++;
+	}
+
+#ifdef CONFIG_LWIP_CHECKSUM_NOGEN
+	netfront_set_tx_flags(first_tx, page);
+#endif
+
+	tx = first_tx;
+	for (q = p; q != NULL; q = q->next)
+		tx = netfront_make_txreqs(dev, tx, q, &used);
+
+	first_tx->size = p->tot_len;
+
+	dprintk("tx: pbuf %d (slots %d used %d)\n", p->tot_len, slots, used);
 
 	wmb();
 	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
@@ -748,7 +806,11 @@ void netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
+
+	LINK_STATS_INC(link.xmit);
+	return ERR_OK;
 }
+
 #endif
 
 static void free_netfront(struct netfront_dev *dev)

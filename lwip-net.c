@@ -118,6 +118,7 @@
 static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 {
     struct netfrontif *nfi = netif->state;
+    err_t err = ERR_OK;
 
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: %c%c: "
 			      "Transmitting %u bytes\n",
@@ -132,15 +133,14 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
         /* fast case: no further buffer allocation needed */
         netfront_xmit(nfi->dev, (unsigned char *) p->payload, p->len);
     } else {
-        netfront_xmit_pbuf(nfi->dev, p);
+        err = netfront_xmit_pbuf(nfi->dev, p);
     }
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
 #endif
 
-    LINK_STATS_INC(link.xmit);
-    return ERR_OK;
+    return err;
 }
 
 /**

@@ -11,7 +11,7 @@ struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned cha
 void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len);
 #ifdef HAVE_LWIP
 void netfront_set_rx_pbuf_handler(struct netfront_dev *dev, void (*thenetif_rx)(struct pbuf *p, void *arg), void *arg);
-void netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p);
+err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p);
 #endif
 void shutdown_netfront(struct netfront_dev *dev);
 void suspend_netfront(void);
