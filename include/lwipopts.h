@@ -165,10 +165,11 @@ void lwip_free(void *ptr);
 
 #define TCP_SND_BUF ((TCP_WND << TCP_RCV_SCALE) * 2)
 #define TCP_GSO 1
-#define TCP_GSO_MAX_SEGS 14
-//#define TCP_GSO_SEG_LEN 65535
+#define TCP_GSO_MAX_SEGS 15
+#define TCP_GSO_SEG_LEN 65535
 /*
- * Allow a pbuf to hold up additional data to avoid long pbuf chains
+ * Allow a pbuf to hold up as much as possible in a single pbuf to avoid
+ * long chains.
  * Use this carefully as it might lead to tcp crashes with the maximum
  * number:
  *

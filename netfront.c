@@ -624,9 +624,8 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 	struct net_buffer* buf;
 	int flags;
 
-	down(&dev->tx_sem);
-
 	local_irq_save(flags);
+	down(&dev->tx_sem);
 	id = get_id_from_freelist(dev->tx_freelist);
 	buf = &dev->tx_buffers[id];
 	local_irq_restore(flags);
@@ -659,6 +658,12 @@ static inline void netfront_set_extras(struct netfront_dev *dev)
 	dprintk("tx: gso: size %u\n", TCP_MSS);
 }
 
+static inline int netfront_tx_available(struct netfront_dev *dev, int slots)
+{
+	return (dev->tx.req_prod_pvt - dev->tx.rsp_cons) <
+			(NET_TX_RING_SIZE - slots);
+}
+
 void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 {
 	int notify;
@@ -675,6 +680,9 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 
 	BUG_ON(len > PAGE_SIZE);
 
+	if (!netfront_tx_available(dev, 1))
+		goto out;
+
 	tx = netfront_get_page(dev);
 	page = dev->tx_buffers[tx->id].page;
 	memcpy(page, data, len);
@@ -690,6 +698,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
 
 	dprintk("tx: raw %d\n", len);
 
+out:
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
@@ -716,8 +725,10 @@ void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
 static inline int netfront_count_pbuf_slots(struct netfront_dev *dev,
 					    struct pbuf *p)
 {
-	int slots = p->tot_len/PAGE_SIZE;
-	return (slots > 1 ? slots + 1 : 1);
+	int slots = p->tot_len / PAGE_SIZE;
+	if (p->tot_len - (slots * PAGE_SIZE))
+		slots++;
+	return slots;
 }
 
 static struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
@@ -762,25 +773,25 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 {
 	struct netif_tx_request *first_tx, *tx;
 	void *page;
-	int slots;
+	int slots, gso;
 	int used = 0;
 	int notify, flags;
 	struct pbuf *q;
+	err_t err = ERR_OK;
 
 	slots = netfront_count_pbuf_slots(dev, p);
-	rmb();
-	if (slots > (NET_TX_RING_SIZE -
-	    (dev->tx.req_prod_pvt - dev->tx.rsp_cons))) {
-		printk("tx: pbuf %d slots, too big for wire\n",
-			slots);
-		LINK_STATS_INC(link.memerr);
-		return ERR_BUF;
+	gso = slots > 1;
+
+	if (!netfront_tx_available(dev, slots + gso)) {
+		LINK_STATS_INC(link.drop);
+		err = ERR_MEM;
+		goto out;
 	}
 
 	first_tx = netfront_get_page(dev);
 	page = dev->tx_buffers[first_tx->id].page;
 
-	if (slots > 1) {
+	if (gso) {
 		first_tx->flags |= NETTXF_extra_info;
 		netfront_set_extras(dev);
 		used++;
@@ -802,13 +813,13 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
 	if (notify)
 		notify_remote_via_evtchn(dev->tx_evtchn);
+	LINK_STATS_INC(link.xmit);
 
+out:
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
-
-	LINK_STATS_INC(link.xmit);
-	return ERR_OK;
+	return err;
 }
 
 #endif
