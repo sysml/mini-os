@@ -118,34 +118,35 @@ struct netfront_dev_list {
 
 static struct netfront_dev_list *dev_list = NULL;
 
-void init_rx_buffers(struct netfront_dev *dev);
+static void init_rx_buffers(struct netfront_dev *dev);
+static void netfront_tx_buf_gc(struct netfront_dev *dev);
 static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 					   unsigned char rawmac[6], char **ip);
 static void _shutdown_netfront(struct netfront_dev *dev);
 
-static inline void add_id_to_freelist(unsigned int id,unsigned short* freelist)
+static inline void add_id_to_freelist(unsigned short id, unsigned short *freelist)
 {
 	freelist[id + 1] = freelist[0];
 	freelist[0]  = id;
 }
 
-static inline unsigned short get_id_from_freelist(unsigned short* freelist)
+static inline unsigned short get_id_from_freelist(unsigned short *freelist)
 {
 	unsigned int id = freelist[0];
 	freelist[0] = freelist[id + 1];
 	return id;
 }
 
-__attribute__((weak)) void netif_rx(unsigned char* data,int len,void* arg)
+__attribute__((weak)) void netif_rx(unsigned char* data, int len, void *arg)
 {
 	printk("%d bytes incoming at %p\n", len, data);
 }
 
-__attribute__((weak)) void net_app_main(void*si, unsigned char*mac)
+__attribute__((weak)) void net_app_main(void *si, unsigned char *mac)
 {}
 
 #ifdef HAVE_LWIP
-__attribute__((weak)) void netif_rx_pbuf(struct pbuf *p, void* arg)
+__attribute__((weak)) void netif_rx_pbuf(struct pbuf *p, void *arg)
 {
 	printk("%d bytes incoming at pbuf %p\n", p->len, p);
 }
@@ -167,11 +168,11 @@ struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev,
 	return NULL;
 }
 
-static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *p_off,
+static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *offset,
 				  unsigned char *data, int32_t len)
 {
 	struct pbuf *q;
-	uint32_t q_ofs = *p_off;
+	uint32_t q_ofs = *offset;
 	unsigned char *cur = data;
 	int l = min(len, (*p)->len);
 
@@ -195,7 +196,7 @@ static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *p_off,
 
 	if (q) {
 		*p = q;
-		*p_off = q_ofs;
+		*offset = q_ofs;
 	}
 }
 
@@ -230,7 +231,7 @@ static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev,
 
 static inline void handle_pbuf(struct netfront_dev *dev,
 			       struct netif_rx_response *rx,
-			       struct net_buffer* buf, int32_t realsize)
+			       struct net_buffer *buf, int32_t realsize)
 {
 	unsigned char* page = buf->page;
 	if (likely(!dev->pbuf)) { /* it's a paged pbuf */
@@ -250,7 +251,7 @@ static inline void handle_pbuf(struct netfront_dev *dev,
 
 static inline int handle_buffer(struct netfront_dev *dev,
 				struct netif_rx_response *rx,
-				struct net_buffer* buf, int32_t realsize)
+				struct net_buffer *buf, int32_t realsize)
 {
 	unsigned char* page = buf->page;
 
@@ -276,14 +277,12 @@ static inline int handle_buffer(struct netfront_dev *dev,
 	return 1;
 }
 
-
 static inline int netfront_rxidx(RING_IDX idx)
 {
 	return idx & (NET_RX_RING_SIZE - 1);
 }
 
-static int netfront_get_size(struct netfront_dev *dev,
-				 RING_IDX ri)
+static int netfront_get_size(struct netfront_dev *dev, RING_IDX ri)
 {
 	struct netif_rx_response *rx;
 	int32_t len = 0;
@@ -303,8 +302,7 @@ static int netfront_get_size(struct netfront_dev *dev,
 }
 
 static int netfront_get_extras(struct netfront_dev *dev,
-			       struct netif_extra_info *extras,
-			       RING_IDX ri)
+			       struct netif_extra_info *extras, RING_IDX ri)
 {
 	struct netif_extra_info *extra;
 	RING_IDX cons = dev->rx.rsp_cons;
@@ -446,48 +444,6 @@ moretodo:
 		notify_remote_via_evtchn(dev->rx_evtchn);
 }
 
-void netfront_tx_buf_gc(struct netfront_dev *dev)
-{
-	RING_IDX cons, prod;
-	unsigned short id;
-
-	do {
-		prod = dev->tx.sring->rsp_prod;
-		rmb(); /* Ensure we see responses up to 'rp'. */
-
-		for (cons = dev->tx.rsp_cons; cons != prod; cons++) {
-			struct netif_tx_response *txrsp;
-
-			txrsp = RING_GET_RESPONSE(&dev->tx, cons);
-			if (txrsp->status == NETIF_RSP_NULL)
-				continue;
-
-			if (txrsp->status == NETIF_RSP_ERROR)
-				printk("tx: error");
-
-			id  = txrsp->id;
-			BUG_ON(id >= NET_TX_RING_SIZE);
-
-			add_id_to_freelist(id, dev->tx_freelist);
-			up(&dev->tx_sem);
-		}
-
-		dev->tx.rsp_cons = prod;
-
-		/*
-		 * Set a new event, then check for race with update of tx_cons.
-		 * Note that it is essential to schedule a callback, no matter
-		 * how few tx_buffers are pending. Even if there is space in the
-		 * transmit ring, higher layers may be blocked because too much
-		 * data is outstanding: in such cases notification from Xen is
-		 * likely to be the only kick that we'll get.
-		 */
-		dev->tx.sring->rsp_event =
-			prod + ((dev->tx.sring->req_prod - prod) >> 1) + 1;
-		mb();
-	} while ((cons == prod) && (prod != dev->tx.sring->rsp_prod));
-}
-
 void netfront_rx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
 	struct netfront_dev *dev = data;
@@ -561,7 +517,7 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data,
 	dev->len = len;
 
 	local_irq_save(flags);
-	network_rx(dev);
+	netfront_rx(dev);
 
 	if (!dev->rlen && fd != -1)
 		/* No data for us, make select stop returning */
@@ -579,7 +535,7 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data,
 #endif
 
 void netfront_set_rx_handler(struct netfront_dev *dev,
-			     void (*thenetif_rx)(unsigned char* data, int len,
+			     void (*thenetif_rx)(unsigned char *data, int len,
 						 void *arg),
 			     void *arg)
 {
@@ -616,6 +572,48 @@ static inline void netfront_set_tx_flags(struct netif_tx_request *tx, void *page
 	}
 }
 #endif
+
+static void netfront_tx_buf_gc(struct netfront_dev *dev)
+{
+	RING_IDX cons, prod;
+	unsigned short id;
+
+	do {
+		prod = dev->tx.sring->rsp_prod;
+		rmb(); /* Ensure we see responses up to 'rp'. */
+
+		for (cons = dev->tx.rsp_cons; cons != prod; cons++) {
+			struct netif_tx_response *txrsp;
+
+			txrsp = RING_GET_RESPONSE(&dev->tx, cons);
+			if (txrsp->status == NETIF_RSP_NULL)
+				continue;
+
+			if (txrsp->status == NETIF_RSP_ERROR)
+				printk("tx: error");
+
+			id  = txrsp->id;
+			BUG_ON(id >= NET_TX_RING_SIZE);
+
+			add_id_to_freelist(id, dev->tx_freelist);
+			up(&dev->tx_sem);
+		}
+
+		dev->tx.rsp_cons = prod;
+
+		/*
+		 * Set a new event, then check for race with update of tx_cons.
+		 * Note that it is essential to schedule a callback, no matter
+		 * how few tx_buffers are pending. Even if there is space in the
+		 * transmit ring, higher layers may be blocked because too much
+		 * data is outstanding: in such cases notification from Xen is
+		 * likely to be the only kick that we'll get.
+		 */
+		dev->tx.sring->rsp_event =
+			prod + ((dev->tx.sring->req_prod - prod) >> 1) + 1;
+		mb();
+	} while ((cons == prod) && (prod != dev->tx.sring->rsp_prod));
+}
 
 static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *dev)
 {
@@ -664,7 +662,7 @@ static inline int netfront_tx_available(struct netfront_dev *dev, int slots)
 			(NET_TX_RING_SIZE - slots);
 }
 
-void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len)
+void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 {
 	int notify;
 	int flags;
@@ -705,23 +703,6 @@ out:
 }
 
 #ifdef HAVE_LWIP
-void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
-				  void (*thenetif_rx)(struct pbuf *p, void *arg),
-				  void *arg)
-{
-	if (dev->netif_rx_pbuf && dev->netif_rx_pbuf != netif_rx_pbuf)
-		printk("Replacing netif_rx_pbuf handler for dev %s\n", dev->nodename);
-
-	dev->netif_rx = NULL;
-	dev->netif_rx_pbuf = thenetif_rx;
-	dev->netif_rx_arg = arg;
-
-	/* Reset runtime state*/
-	dev->pbuf = NULL;
-	dev->pbuf_cur = NULL;
-	dev->pbuf_off = 0;
-}
-
 static inline int netfront_count_pbuf_slots(struct netfront_dev *dev,
 					    struct pbuf *p)
 {
@@ -822,6 +803,22 @@ out:
 	return err;
 }
 
+void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
+				  void (*thenetif_rx)(struct pbuf *p, void *arg),
+				  void *arg)
+{
+	if (dev->netif_rx_pbuf && dev->netif_rx_pbuf != netif_rx_pbuf)
+		printk("Replacing netif_rx_pbuf handler for dev %s\n", dev->nodename);
+
+	dev->netif_rx = NULL;
+	dev->netif_rx_pbuf = thenetif_rx;
+	dev->netif_rx_arg = arg;
+
+	/* Reset runtime state*/
+	dev->pbuf = NULL;
+	dev->pbuf_cur = NULL;
+	dev->pbuf_off = 0;
+}
 #endif
 
 static void free_netfront(struct netfront_dev *dev)
