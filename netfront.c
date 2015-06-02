@@ -793,12 +793,12 @@ static struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
 err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 {
 	struct netif_tx_request *first_tx, *tx;
-	void *page;
 	int slots, gso;
 	int used = 0;
 	int notify, flags;
 	struct pbuf *q;
 	err_t err = ERR_OK;
+	void *page;
 
 	/* Counts how many slots we require for this buf */
 	slots = netfront_count_pbuf_slots(dev, p);
@@ -813,8 +813,6 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 
 	/* Set extras if packet is GSO kind */
 	first_tx = netfront_get_page(dev);
-	page = dev->tx_buffers[first_tx->id].page;
-
 	if (gso) {
 		first_tx->flags |= NETTXF_extra_info;
 		netfront_set_extras(dev);
@@ -822,6 +820,8 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	}
 
 #ifdef CONFIG_LWIP_CHECKSUM_NOGEN
+	/* Set checksum blank flag to offload checksum to host */
+	page = dev->tx_buffers[first_tx->id].page;
 	netfront_set_tx_flags(first_tx, page);
 #endif
 
