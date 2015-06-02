@@ -17,6 +17,14 @@
 #include <mini-os/lib.h>
 #include <mini-os/semaphore.h>
 #include <xen/io/netif.h>
+
+#if defined(__x86_64__)
+#include <rte_memcpy.h>
+#define NETIF_MEMCPY(dst, src, len)  rte_memcpy((dst), (src), (len))
+#else
+#define NETIF_MEMCPY(dst, src, len)  memcpy((dst), (src), (len))
+#endif
+
 #ifdef HAVE_LWIP
 #include "lwip/pbuf.h"
 #include <lwip/stats.h>
@@ -182,7 +190,7 @@ static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *offset,
 	/* pbuf chain */
 	for(q = *p; q && len > 0; cur += l) {
 		l = min(len, q->len - q_ofs);
-		MEMCPY(q->payload + q_ofs, cur, l);
+		NETIF_MEMCPY(q->payload + q_ofs, cur, l);
 
 		dprintk("rx: copy: pbuf %p ofs %d l %d\n", q, q_ofs, l);
 
@@ -216,7 +224,7 @@ static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev,
 
 	if (likely(!p->next)) {
 		/* fast path */
-		memcpy(p->payload, data, len);
+		NETIF_MEMCPY(p->payload, data, len);
 	} else {
 		dev->pbuf_cur = p;
 		dev->pbuf_off = 0;
@@ -261,7 +269,7 @@ static inline int handle_buffer(struct netfront_dev *dev,
 		ASSERT(current == main_thread);
 		if (len > dev->len)
 			len = dev->len;
-		memcpy(dev->data, page+rx->offset, len);
+		NETIF_MEMCPY(dev->data, page+rx->offset, len);
 		dev->rlen = len;
 		return 1;
 	}
@@ -320,7 +328,7 @@ static int netfront_get_extras(struct netfront_dev *dev,
 			dprintk("rx: scan: extra %u %s\n", extra->type,
 				(extra->flags & XEN_NETIF_EXTRA_FLAG_MORE
 					? "(more true)": ""));
-			memcpy(&extras[extra->type - 1], extra,
+			NETIF_MEMCPY(&extras[extra->type - 1], extra,
 			       sizeof(*extra));
 		}
 	} while (extra->flags & XEN_NETIF_EXTRA_FLAG_MORE);
@@ -402,7 +410,7 @@ moretodo:
 	cons = dev->rx.rsp_cons;
 
 	while (cons != rp) {
-		memcpy(rsp, RING_GET_RESPONSE(&dev->rx, cons), sizeof(*rsp));
+		NETIF_MEMCPY(rsp, RING_GET_RESPONSE(&dev->rx, cons), sizeof(*rsp));
 		netfront_get_responses(dev, cons);
 
 #ifdef HAVE_LWIP
@@ -683,7 +691,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 
 	tx = netfront_get_page(dev);
 	page = dev->tx_buffers[tx->id].page;
-	memcpy(page, data, len);
+	NETIF_MEMCPY(page, data, len);
 #ifdef CONFIG_LWIP_CHECKSUM_NOGEN
 	netfront_set_tx_flags(tx, page);
 #endif
@@ -738,7 +746,7 @@ static struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
 		dprintk("tx: make: size %u len %u offset %u q_offset %u id %u\n",
 				size, len, offset, q_ofs, tx->id);
 
-		MEMCPY(page + offset, p->payload + q_ofs, size);
+		NETIF_MEMCPY(page + offset, p->payload + q_ofs, size);
 		tx->size += size;
 
 		len -= size;
