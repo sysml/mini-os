@@ -176,6 +176,7 @@ struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev,
 	return NULL;
 }
 
+/* Copies data to a pbuf */
 static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *offset,
 				  unsigned char *data, int32_t len)
 {
@@ -208,6 +209,7 @@ static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *offset,
 	}
 }
 
+/* Allocates a pbuf */
 static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev,
 					       unsigned char *data, int32_t len,
 					       int32_t realsize, int pad)
@@ -257,6 +259,11 @@ static inline void handle_pbuf(struct netfront_dev *dev,
 }
 #endif
 
+/*
+ * Main entry point for handling a packet. If HAVE_LWIP is set
+ * we allow passing up pbufs upon registering the appropriate
+ * callback.
+ */
 static inline int handle_buffer(struct netfront_dev *dev,
 				struct netif_rx_response *rx,
 				struct net_buffer *buf, int32_t realsize)
@@ -285,11 +292,16 @@ static inline int handle_buffer(struct netfront_dev *dev,
 	return 1;
 }
 
+/* req->id is numbered from 0 - 255 */
 static inline int netfront_rxidx(RING_IDX idx)
 {
 	return idx & (NET_RX_RING_SIZE - 1);
 }
 
+/*
+ * Computes the size of the pbuf to allocate based
+ * on how many slots the (possible GSO) frame requires.
+ */
 static int netfront_get_size(struct netfront_dev *dev, RING_IDX ri)
 {
 	struct netif_rx_response *rx;
@@ -309,6 +321,9 @@ static int netfront_get_size(struct netfront_dev *dev, RING_IDX ri)
 	return len;
 }
 
+/*
+ * Reads extra slots to check for a GSO packet
+ */
 static int netfront_get_extras(struct netfront_dev *dev,
 			       struct netif_extra_info *extras, RING_IDX ri)
 {
@@ -337,6 +352,9 @@ static int netfront_get_extras(struct netfront_dev *dev,
 	return err;
 }
 
+/*
+ * Reads RX responses for a single packet
+ */
 static int netfront_get_responses(struct netfront_dev *dev,
 				  RING_IDX rp)
 {
@@ -559,6 +577,7 @@ void netfront_set_rx_handler(struct netfront_dev *dev,
 #define IPPROTO_TCP     6
 #define get_ipproto(x) (((unsigned char *)(x))[9])
 
+/* Sets checksum flags for the first TX request */
 static inline void netfront_set_tx_flags(struct netif_tx_request *tx, void *page)
 {
 	struct eth_hdr *ethhdr;
@@ -623,6 +642,9 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 	} while ((cons == prod) && (prod != dev->tx.sring->rsp_prod));
 }
 
+/*
+ * Gets a free TX request for copying data to backend
+ */
 static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *dev)
 {
 	struct netif_tx_request *tx;
@@ -645,6 +667,9 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 	return tx;
 }
 
+/*
+ * Sets extra slots to enable GSO support
+ */
 static inline void netfront_set_extras(struct netfront_dev *dev)
 {
 	struct netif_extra_info *gso;
@@ -653,7 +678,7 @@ static inline void netfront_set_extras(struct netfront_dev *dev)
 		RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
 
 	gso->u.gso.size = TCP_MSS;
-	// TODO: IPv6
+	// TODO: IPv6 and Check for TCP ip proto
 	gso->u.gso.type = XEN_NETIF_GSO_TYPE_TCPV4;
 	gso->u.gso.pad = 0;
 	gso->u.gso.features = 0;
@@ -670,6 +695,10 @@ static inline int netfront_tx_available(struct netfront_dev *dev, int slots)
 			(NET_TX_RING_SIZE - slots);
 }
 
+/**
+ * Transmit function for raw buffers
+ * TODO: GSO support
+ */
 void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 {
 	int notify;
@@ -758,6 +787,9 @@ static struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
 	return tx;
 }
 
+/**
+ * Transmit function for pbufs which handles GSO packets
+ */
 err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 {
 	struct netif_tx_request *first_tx, *tx;
@@ -768,15 +800,18 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	struct pbuf *q;
 	err_t err = ERR_OK;
 
+	/* Counts how many slots we require for this buf */
 	slots = netfront_count_pbuf_slots(dev, p);
 	gso = slots > 1;
 
+	/* Checks if there are enough requests for this many slots */
 	if (!netfront_tx_available(dev, slots + gso)) {
 		LINK_STATS_INC(link.drop);
 		err = ERR_MEM;
 		goto out;
 	}
 
+	/* Set extras if packet is GSO kind */
 	first_tx = netfront_get_page(dev);
 	page = dev->tx_buffers[first_tx->id].page;
 
@@ -790,14 +825,15 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	netfront_set_tx_flags(first_tx, page);
 #endif
 
+	/* Make TX requests for the pbuf */
 	tx = first_tx;
 	for (q = p; q != NULL; q = q->next)
 		tx = netfront_make_txreqs(dev, tx, q, &used);
 
+	/* First request contains total size of packet */
 	first_tx->size = p->tot_len;
 
-	dprintk("tx: pbuf %d (slots %d used %d)\n", p->tot_len, slots, used);
-
+	/* So that backend sees new requests and check notify */
 	wmb();
 	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
 	if (notify)
@@ -805,6 +841,7 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	LINK_STATS_INC(link.xmit);
 
 out:
+	/* Collects any outstanding responses for more requests */
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
