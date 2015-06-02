@@ -169,6 +169,7 @@ void lwip_free(void *ptr);
 #endif
 
 #define TCP_SND_BUF ((TCP_WND << TCP_RCV_SCALE) * 2)
+#ifdef CONFIG_NETFRONT_GSO
 #define TCP_GSO 1
 #define TCP_GSO_MAX_SEGS 15
 #define TCP_GSO_SEG_LEN 65535
@@ -181,6 +182,7 @@ void lwip_free(void *ptr);
  * TCP_OVERSIZE 65481
  */
 #define TCP_OVERSIZE 0
+#endif
 #endif
 
 #define TCP_SND_QUEUELEN (4 * TCP_SND_BUF / TCP_MSS)
