@@ -110,6 +110,7 @@ int rand(void);
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+#ifdef DEBUG_BUILD
 #define ASSERT(x)                                              \
 do {                                                           \
 	if (!(x)) {                                                \
@@ -120,6 +121,9 @@ do {                                                           \
         BUG();                                                 \
 	}                                                          \
 } while(0)
+#else
+#define ASSERT(x) do {} while(0)
+#endif
 
 #define BUG_ON(x) ASSERT(!(x))
 
