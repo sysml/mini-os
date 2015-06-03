@@ -1,6 +1,13 @@
 #include <mini-os/wait.h>
 #include <xen/io/blkif.h>
 #include <mini-os/types.h>
+
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+#define __LOG2_8BIT(x)  (8 - 90/(((x)/4+14)|1) - 2/((x)/2+1))
+#define BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST \
+    (1 << (__LOG2_8BIT(BLKIF_MAX_SEGMENTS_PER_REQUEST)))
+#endif
+
 struct blkfront_dev;
 struct blk_buffer;
 struct blkfront_aiocb
@@ -14,7 +21,7 @@ struct blkfront_aiocb
     void *data;
 
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
-    struct blk_buffer *prst_buffer[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+    struct blk_buffer *prst_buffer[BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST];
 #else
     grant_ref_t gref[BLKIF_MAX_SEGMENTS_PER_REQUEST];
 #endif
