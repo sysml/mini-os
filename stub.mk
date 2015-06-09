@@ -489,8 +489,8 @@ ifeq ($(debug),y)
 CFLAGS			+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls -DDEBUG_BUILD
 CXXFLAGS		+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls -DDEBUG_BUILD
 else
-CFLAGS			+= -O3 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
-CXXFLAGS		+= -O3 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
+CFLAGS			+= -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
+CXXFLAGS		+= -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
 endif
 
 -include $(DEPS)
