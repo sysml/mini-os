@@ -53,6 +53,11 @@ int blkfront_posix_rwop(int fd, uint8_t* buf, size_t count, int write);
 int blkfront_posix_fstat(int fd, struct stat* buf);
 #endif
 void blkfront_aio(struct blkfront_aiocb *aiocbp, int write);
+void blkfront_aio_nosched(struct blkfront_aiocb *aiocbp, int write);
+void blkfront_wait_slot(struct blkfront_dev *dev);
+void blkfront_wait_slot_nosched(struct blkfront_dev *dev);
+int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write);
+void blkfront_aio_submit(struct blkfront_dev *dev);
 #define blkfront_aio_read(aiocbp) blkfront_aio(aiocbp, 0)
 #define blkfront_aio_write(aiocbp) blkfront_aio(aiocbp, 1)
 void blkfront_io(struct blkfront_aiocb *aiocbp, int write);

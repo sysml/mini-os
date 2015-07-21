@@ -482,7 +482,7 @@ static inline void _fmemcpy256(void *dst, const void *src, size_t len)
 }
 #endif
 
-static void blkfront_wait_slot(struct blkfront_dev *dev)
+void blkfront_wait_slot(struct blkfront_dev *dev)
 {
     /* Wait for a slot */
     if (RING_FULL(&dev->ring)) {
@@ -504,13 +504,47 @@ static void blkfront_wait_slot(struct blkfront_dev *dev)
     }
 }
 
+void blkfront_wait_slot_nosched(struct blkfront_dev *dev)
+{
+    /* Wait for a slot */
+    if (RING_FULL(&dev->ring)) {
+	unsigned long flags;
+	local_irq_save(flags);
+	while (1) {
+	    blkfront_aio_poll(dev);
+	    if (!RING_FULL(&dev->ring))
+		break;
+	    local_irq_restore(flags);
+	    local_irq_save(flags);
+	}
+	local_irq_restore(flags);
+    }
+}
+
 /* Issue an aio */
 void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
 {
     struct blkfront_dev *dev = aiocbp->aio_dev;
+
+    blkfront_wait_slot(dev);
+    blkfront_aio_enqueue(aiocbp, write);
+    blkfront_aio_submit(dev);
+}
+
+void blkfront_aio_nosched(struct blkfront_aiocb *aiocbp, int write)
+{
+    struct blkfront_dev *dev = aiocbp->aio_dev;
+
+    blkfront_wait_slot_nosched(dev);
+    blkfront_aio_enqueue(aiocbp, write);
+    blkfront_aio_submit(dev);
+}
+
+int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write)
+{
+    struct blkfront_dev *dev = aiocbp->aio_dev;
     struct blkif_request *req;
     RING_IDX i;
-    int notify;
     int n, j;
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
     struct blk_buffer *buffer;
@@ -544,7 +578,8 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
     ASSERT(n <= BLKIF_MAX_SEGMENTS_PER_REQUEST);
 #endif
 
-    blkfront_wait_slot(dev);
+    if (RING_FULL(&dev->ring))
+        return -EBUSY;
     i = dev->ring.req_prod_pvt;
     req = RING_GET_REQUEST(&dev->ring, i);
 
@@ -598,6 +633,13 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
     dev->ring.req_prod_pvt = i + 1;
 
     wmb();
+    return 0;
+}
+
+void blkfront_aio_submit(struct blkfront_dev *dev)
+{
+    int notify;
+
     RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->ring, notify);
 
     if(notify) notify_remote_via_evtchn(dev->evtchn);
