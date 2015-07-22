@@ -50,7 +50,7 @@
    */
   #define MEM_LIBC_MALLOC 1 /* enable heap */
   #define MEMP_MEM_MALLOC 0 /* pool allocations still via pool */
-#endif
+#endif /* CONFIG_LWIP_HEAP_ONLY / CONFIG_LWIP_POOLS_ONLY */
 
 #define MEMP_SEPARATE_POOLS 1 /* for each pool use a separate aray in data segment */
 #define MEM_ALIGNMENT 4
@@ -58,7 +58,7 @@
 #if MEM_USE_POOLS
 /* requires lwippools.h */
 #define MEMP_USE_CUSTOM_POOLS 0
-#endif
+#endif /* MEM_USE_POOLS */
 
 #if MEM_LIBC_MALLOC
 #include <stddef.h> /* size_t */
@@ -69,7 +69,7 @@ void lwip_free(void *ptr);
 #define mem_malloc   lwip_malloc
 #define mem_calloc   lwip_calloc
 #define mem_free     lwip_free
-#endif
+#endif /* MEM_LIBC_MALLOC */
 
 #if defined __x86_64__ && !defined DEBUG_BUILD
 #include <rte_memcpy.h>
@@ -77,7 +77,7 @@ void lwip_free(void *ptr);
 #define MEMCPY(dst, src, len)  rte_memcpy((dst), (src), (len))
 #else
 #define MEMCPY(dst, src, len)  memcpy((dst), (src), (len))
-#endif
+#endif /* defined __x86_64__ && !defined DEBUG_BUILD */
 
 /*
  * Feature selection
@@ -88,12 +88,13 @@ void lwip_free(void *ptr);
 #define LWIP_SOCKET 1 /* required by lib/sys.c */
 #define LWIP_IGMP 1
 #define LWIP_DNS 1
+
 #ifndef CONFIG_LWIP_MINIMAL
 #define LWIP_SNMP 1
 #define LWIP_PPP 1
 #define LWIP_SLIP 1
 #define LWIP_AUTOIP 1
-#endif
+#endif /* CONFIG_LWIP_MINIMAL */
 
 /* disable BSD-style socket */
 #define LWIP_COMPAT_SOCKETS 0
@@ -105,11 +106,13 @@ void lwip_free(void *ptr);
 #if !defined CONFIG_LWIP_PBUF_NUM_RX || !CONFIG_LWIP_PBUF_NUM_RX
 #undef CONFIG_LWIP_PBUF_NUM_RX
 #define CONFIG_LWIP_PBUF_NUM_RX 512
-#endif
+#endif /* !defined CONFIG_LWIP_PBUF_NUM_RX || !CONFIG_LWIP_PBUF_NUM_RX */
+
 #if !defined CONFIG_LWIP_PBUF_NUM_REF || !CONFIG_LWIP_PBUF_NUM_REF
 #undef CONFIG_LWIP_PBUF_NUM_REF
 #define CONFIG_LWIP_PBUF_NUM_REF (MEMP_NUM_TCP_PCB * 24)
-#endif
+#endif /* !defined CONFIG_LWIP_PBUF_NUM_REF || !CONFIG_LWIP_PBUF_NUM_REF */
+
 #define PBUF_POOL_SIZE CONFIG_LWIP_PBUF_NUM_RX
 #define MEMP_NUM_PBUF CONFIG_LWIP_PBUF_NUM_REF
 
@@ -120,7 +123,7 @@ void lwip_free(void *ptr);
 #define TCPIP_THREAD_NAME "lwIP"
 #define TCPIP_MBOX_SIZE 256
 #define MEMP_NUM_TCPIP_MSG_INPKT 256
-#endif
+#endif /* CONFIG_LWIP_NOTHREADS */
 
 /*
  * ARP options
@@ -139,37 +142,33 @@ void lwip_free(void *ptr);
 #if !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON
 #undef CONFIG_LWIP_NUM_TCPCON
 #define CONFIG_LWIP_NUM_TCPCON 512
-#endif
+#endif /* !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON */
 
 #define TCP_CALCULATE_EFF_SEND_MSS 1
 #define IP_FRAG 0
 #define TCP_MSS 1460
-#define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
 
 #if defined CONFIG_LWIP_WND_SCALE
 #define LWIP_WND_SCALE 1
 #else
 #define LWIP_WND_SCALE 0
-#endif
+#endif /* CONFIG_LWIP_WND_SCALE */
 
 #if LWIP_WND_SCALE
-#undef TCP_OVERSIZE
 /*
  * Maximum window and scaling factor
  * Optimal settings for RX performance are:
  * 	TCP_WND		262143
  * 	TCP_RCV_SCALE	5
  */
-#undef TCP_WND
-#define TCP_WND 262142
-
 #if defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1
 #define TCP_RCV_SCALE CONFIG_LWIP_WND_SCALE_FACTOR /* scaling factor 0..14 */
 #else
 #define TCP_RCV_SCALE 3
-#endif
-
+#endif /* defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1 */
+#define TCP_WND 262142
 #define TCP_SND_BUF ((TCP_WND << TCP_RCV_SCALE) * 2)
+
 #ifdef CONFIG_NETFRONT_GSO
 #define TCP_GSO 1
 #define TCP_GSO_MAX_SEGS 15
@@ -182,9 +181,17 @@ void lwip_free(void *ptr);
  *
  * TCP_OVERSIZE 65481
  */
+#undef TCP_OVERSIZE
 #define TCP_OVERSIZE 0
-#endif
-#endif
+#endif /* CONFIG_NETFRONT_GSO */
+
+#else /* LWIP_WND_SCALE */
+/*
+ * Options when no window scaling  is enabled
+ */
+#define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
+#define TCP_SND_BUF (TCP_WND * 2)
+#endif /* LWIP_WND_SCALE */
 
 #define TCP_SND_QUEUELEN (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_QUEUE_OOSEQ 1
