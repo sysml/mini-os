@@ -590,6 +590,43 @@ distclean-stub:
 banner:
 	@#
 
+################################################################################
+# Tags
+################################################################################
+all_sources_lists = minios.srclist own.srclist xen.srclist newlib.srclist
+minios.srclist: ROOT_SRC = $(MINIOS_ROOT)
+xen.srclist: ROOT_SRC = $(XEN_ROOT)
+newlib.srclist: ROOT_SRC = $(NEWLIB_ROOT)
+own.srclist: ROOT_SRC = .
+%.srclist:
+	-$(call verbose_cmd, \
+		find -L $(ROOT_SRC) \
+		\( -iname '*.c' -o -iname '*.cpp' -o -iname '*.h' -o -iname '*.hpp' \) \
+		-exec readlink -f '{}' \; > $@, \
+		'LST $(ROOT_SRC)')
+
+src.list: $(all_sources_lists)
+	$(call verbose_cmd, \
+		cat $(all_sources_lists) | sort -u > $@, \
+		'GEN $@')
+
+.PHONY: cscope
+cscope: src.list
+	$(call verbose_cmd, \
+		cscope -c -b -k -i src.list -f cscope.out, \
+		"GEN scope.out")
+
+.PHONY: TAGS
+TAGS: src.list
+	$(call verbose_cmd, \
+		rm -f TAGS; xargs -a src.list etags -a, \
+		'GEN TAGS')
+
+.PHONY: clean-tags
+clean-tags:
+	$(call verbose_cmd, $(RM) \
+		src.list $(all_sources_lists) cscope.out TAGS, \
+		'CLN tags')
 
 ################################################################################
 # Others
@@ -611,5 +648,5 @@ $(BUILD_DIRS):
 
 .PHONY: clean
 clean: clean-minios clean-lwip clean-stub
-distclean: distclean-minios distclean-lwip distclean-stub
+distclean: distclean-minios distclean-lwip distclean-stub clean-tags
 	$(call verbose_cmd,$(RMDIR),'CLN',$(STUBDOM_BUILD_DIR))
