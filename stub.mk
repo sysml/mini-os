@@ -457,7 +457,7 @@ CINCLUDES		+= -isystem $(NEWLIB_ROOT)/include
 
 ASDEFINES		+= -D__ASSEMBLY__
 
-LDFLAGS			+= -nostdlib
+LDFLAGS			+= -nostdlib --omagic
 
 LDLIBS			+= -L$(NEWLIB_ROOT)/lib -lc -lm
 
