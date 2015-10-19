@@ -25,6 +25,10 @@
 #define NETIF_MEMCPY(dst, src, len)  memcpy((dst), (src), (len))
 #endif
 
+#ifndef DIV_ROUND_UP
+#define DIV_ROUND_UP(num, div) (((num) + (div) - 1) / (div))
+#endif
+
 #ifdef HAVE_LWIP
 #include "lwip/pbuf.h"
 #include <lwip/stats.h>
@@ -281,6 +285,10 @@ static inline int handle_buffer(struct netfront_dev *dev,
 		return 1;
 	}
 #endif
+	dprintk("rx: %c%c- %u bytes\n",
+		rx->flags & NETRXF_extra_info ? 'S' : '-',
+		rx->flags & ((NETRXF_csum_blank) | (NETRXF_data_validated)) ? 'C' : '-',
+		rx->status);
 
 	if (dev->netif_rx)
 		dev->netif_rx(page+rx->offset, rx->status, dev->netif_rx_arg);
@@ -572,34 +580,6 @@ void netfront_set_rx_handler(struct netfront_dev *dev,
 	dev->netif_rx_arg = arg;
 }
 
-#ifdef CONFIG_LWIP_CHECKSUM_NOGEN
-#warning "TCP Checksum disabled"
-#define IPPROTO_TCP     6
-#define get_ipproto(x) (((unsigned char *)(x))[9])
-
-/* Sets checksum flags for the first TX request */
-static inline void netfront_set_tx_flags(struct netif_tx_request *tx, void *page)
-{
-	struct eth_hdr *ethhdr;
-
-	page -= ETH_PAD_SIZE;
-	ethhdr = page;
-
-	switch (PP_HTONS(ethhdr->type)) {
-		/* IP or ARP packet? */
-		case ETHTYPE_IP:
-			page += SIZEOF_ETH_HDR;
-			if (get_ipproto(page) == IPPROTO_TCP)
-				tx->flags |= (NETTXF_csum_blank | NETTXF_data_validated);
-			else
-				tx->flags |= NETTXF_data_validated;
-			break;
-		default:
-			break;
-	}
-}
-#endif
-
 static void netfront_tx_buf_gc(struct netfront_dev *dev)
 {
 	RING_IDX cons, prod;
@@ -667,41 +647,24 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 	return tx;
 }
 
-/*
- * Sets extra slots to enable GSO support
- */
-static inline void netfront_set_extras(struct netfront_dev *dev)
+#define netfront_tx_available(dev, slots) \
+  (((dev)->tx.req_prod_pvt - (dev)->tx.rsp_cons) < (NET_TX_RING_SIZE - (slots)))
+
+static inline void netfront_xmit_notify(struct netfront_dev *dev)
 {
-	struct netif_extra_info *gso;
+	int notify;
 
-	gso = (struct netif_extra_info *)
-		RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
-
-	gso->u.gso.size = TCP_MSS;
-	// TODO: IPv6 and Check for TCP ip proto
-	gso->u.gso.type = XEN_NETIF_GSO_TYPE_TCPV4;
-	gso->u.gso.pad = 0;
-	gso->u.gso.features = 0;
-
-	gso->type = XEN_NETIF_EXTRA_TYPE_GSO;
-	gso->flags = 0;
-
-	dprintk("tx: gso: size %u\n", TCP_MSS);
-}
-
-static inline int netfront_tx_available(struct netfront_dev *dev, int slots)
-{
-	return (dev->tx.req_prod_pvt - dev->tx.rsp_cons) <
-			(NET_TX_RING_SIZE - slots);
+	/* So that backend sees new requests and check notify */
+	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
+	if (notify)
+		notify_remote_via_evtchn(dev->tx_evtchn);
 }
 
 /**
- * Transmit function for raw buffers
- * TODO: GSO support
+ * Transmit function for raw buffers (non-GSO/TCO)
  */
 void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 {
-	int notify;
 	int flags;
 	struct netif_tx_request *tx;
 	void* page;
@@ -721,16 +684,11 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 	tx = netfront_get_page(dev);
 	page = dev->tx_buffers[tx->id].page;
 	NETIF_MEMCPY(page, data, len);
-#ifdef CONFIG_LWIP_CHECKSUM_NOGEN
-	netfront_set_tx_flags(tx, page);
-#endif
+	tx->flags |= (NETTXF_data_validated);
 	tx->size = len;
 
 	wmb();
-	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
-	if (notify)
-		notify_remote_via_evtchn(dev->tx_evtchn);
-
+	netfront_xmit_notify(dev);
 	dprintk("tx: raw %d\n", len);
 
 out:
@@ -740,18 +698,12 @@ out:
 }
 
 #ifdef HAVE_LWIP
-static inline int netfront_count_pbuf_slots(struct netfront_dev *dev,
-					    struct pbuf *p)
-{
-	int slots = p->tot_len / PAGE_SIZE;
-	if (p->tot_len - (slots * PAGE_SIZE))
-		slots++;
-	return slots;
-}
+#define netfront_count_pbuf_slots(dev, len) \
+	DIV_ROUND_UP((len), PAGE_SIZE);
 
-static struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
-						     struct netif_tx_request *tx,
-						     struct pbuf *p, int *slots)
+static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
+							    struct netif_tx_request *tx,
+							    struct pbuf *p, int *slots)
 {
 	void *page = dev->tx_buffers[tx->id].page;
 	unsigned offset = tx->size;
@@ -788,42 +740,59 @@ static struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
 }
 
 /**
- * Transmit function for pbufs which handles GSO packets
+ * Transmit function for pbufs which can handle checksum and segmentation offloading for TCPv4 and TCPv6
  */
-err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
+err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int tso, int push)
 {
 	struct netif_tx_request *first_tx, *tx;
-	int slots, gso;
+	struct netif_extra_info *extra_info;
+	int slots;
 	int used = 0;
-	int notify, flags;
+	int flags;
 	struct pbuf *q;
-	err_t err = ERR_OK;
 	void *page;
+#ifdef CONFIG_NETFRONT_GSO
+	int gso;
+#endif /* CONFIG_NETFRONT_GSO */
 
 	/* Counts how many slots we require for this buf */
-	slots = netfront_count_pbuf_slots(dev, p);
-	gso = slots > 1;
+	slots = netfront_count_pbuf_slots(dev, p->tot_len);
+#ifdef CONFIG_NETFRONT_GSO
+	gso = (p->tot_len > TCP_MSS) ? 1 : 0;
+	/* GSO requires TCP offloading set */
+	BUG_ON(gso && !(tso & (XEN_NETIF_GSO_TYPE_TCPV4 | XEN_NETIF_GSO_TYPE_TCPV6)));
+#endif /* CONFIG_NETFRONT_GSO */
 
-	/* Checks if there are enough requests for this many slots */
-	if (!netfront_tx_available(dev, slots + gso)) {
-		LINK_STATS_INC(link.drop);
-		err = ERR_MEM;
-		goto out;
+	/* Checks if there are enough requests for this many slots (gso requires one slot more) */
+#ifdef CONFIG_NETFRONT_GSO
+	if (unlikely(!netfront_tx_available(dev, slots + gso))) {
+#else
+	if (unlikely(!netfront_tx_available(dev, slots))) {
+#endif /* CONFIG_NETFRONT_GSO */
+		netfront_xmit_push(dev);
+		return ERR_MEM;
 	}
 
 	/* Set extras if packet is GSO kind */
 	first_tx = netfront_get_page(dev);
+#ifdef CONFIG_NETFRONT_GSO
 	if (gso) {
 		first_tx->flags |= NETTXF_extra_info;
-		netfront_set_extras(dev);
+		extra_info = RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
+		extra_info->type = XEN_NETIF_EXTRA_TYPE_GSO;
+		extra_info->flags = 0;
+		extra_info->u.gso.size = TCP_MSS;
+		extra_info->u.gso.type = tso; /* XEN_NETIF_GSO_TYPE_TCPV4, XEN_NETIF_GSO_TYPE_TCPV6 */
+		extra_info->u.gso.pad = 0;
+		extra_info->u.gso.features = 0;
+
 		used++;
 	}
-
-#ifdef CONFIG_LWIP_CHECKSUM_NOGEN
-	/* Set checksum blank flag to offload checksum to host */
-	page = dev->tx_buffers[first_tx->id].page;
-	netfront_set_tx_flags(first_tx, page);
-#endif
+	/* partially checksummed (offload enabled), or checksummed */
+	first_tx->flags |= tso ? ((NETTXF_csum_blank) | (NETTXF_data_validated)) : (NETTXF_data_validated);
+#else
+	first_tx->flags |= (NETTXF_data_validated);
+#endif /* CONFIG_NETFRONT_GSO */
 
 	/* Make TX requests for the pbuf */
 	tx = first_tx;
@@ -833,19 +802,26 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p)
 	/* First request contains total size of packet */
 	first_tx->size = p->tot_len;
 
-	/* So that backend sees new requests and check notify */
 	wmb();
-	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->tx, notify);
-	if (notify)
-		notify_remote_via_evtchn(dev->tx_evtchn);
-	LINK_STATS_INC(link.xmit);
+	push |= (((dev)->tx.req_prod_pvt - (dev)->tx.rsp_cons) <= NET_TX_RING_SIZE / 2);
+	if (push != 0)
+		netfront_xmit_push(dev);
 
-out:
+	dprintk("tx: %c%c%c %u bytes (%u slots)\n", gso ? 'S' : '-', tso ? 'C' : '-', push ? 'P' : '-', p->tot_len, slots);
+
+	return ERR_OK;
+}
+
+void netfront_xmit_push(struct netfront_dev *dev)
+{
+	int flags;
+
+	netfront_xmit_notify(dev);
+
 	/* Collects any outstanding responses for more requests */
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
-	return err;
 }
 
 void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
@@ -1172,6 +1148,13 @@ again:
 
 	if (err) {
 		message = "writing feature-gso-tcpv4";
+		goto abort_transaction;
+	}
+
+	err = xenbus_printf(xbt, dev->nodename, "feature-gso-tcpv6", "%u", 1);
+
+	if (err) {
+		message = "writing feature-gso-tcpv6";
 		goto abort_transaction;
 	}
 #endif

@@ -84,6 +84,18 @@
 #include "lwip/def.h"
 #include "lwip/mem.h"
 #include "lwip/pbuf.h"
+
+#if defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX
+#include "netif/etharp.h"
+#include "lwip/ip4.h"
+#if IPV6_SUPPORT
+#include "lwip/ip6.h"
+#endif
+#include "lwip/tcp_impl.h"
+#include "lwip/tcp.h"
+#include <xen/io/netif.h>
+#endif /* defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX */
+
 #include <lwip/stats.h>
 #include <lwip/snmp.h>
 #include <sys/time.h>
@@ -103,6 +115,36 @@
        __a < __b ? __a : __b; })
 #endif
 
+/*
+static inline void printp(struct pbuf *p)
+{
+  u16_t left = p->tot_len;
+  u16_t offset = 0;
+  unsigned char o;
+  u16_t i = 0;
+
+  while (left) {
+    if (offset == p->len) {
+      p = p->next;
+      offset = 0;
+    }
+
+    if (i && i % 2 == 0)
+      printk(" ");
+    if (i && i % 16 == 0)
+      printk("\n");
+    if (i % 16 == 0)
+      printk(" %04x: ", offset);
+
+    o = *(((typeof(o) *) p->payload) + offset);
+    printk("%02x", (unsigned char) o);
+
+    ++offset; ++i; --left;
+  }
+  printk("\n", o);
+}
+*/
+
 /**
  * This function does the actual transmission of a packet. The packet is
  * contained in the pbuf that is passed to the function. This pbuf
@@ -113,28 +155,97 @@
  * @param p
  *  the packet to send (e.g. IP packet including MAC addresses and type)
  * @return
- *  ERR_OK when the packet could be sent; an err_t value otherwise
+ *  ERR_OK when the packet could be enqueued for sending; an err_t value otherwise
  */
 static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 {
     struct netfrontif *nfi = netif->state;
-    err_t err = ERR_OK;
+#if defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX
+    s16_t ip_hdr_offset;
+    const struct eth_hdr *ethhdr;
+    const struct ip_hdr *iphdr;
+#endif /* defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX */
+#ifdef CONFIG_LWIP_BATCHTX
+    const struct tcp_hdr *tcphdr;
+#endif /* CONFIG_LWIP_BATCHTX */
+    int tso = 0;
+    int push = 1;
+    err_t err;
 
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: %c%c: "
 			      "Transmitting %u bytes\n",
 			      netif->name[0], netif->name[1],
 			      p->tot_len));
 
+#if defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX
+    /* detect if payload contains a TCP packet */
+    /* NOTE: We assume here that all protocol headers are in the first pbuf of a pbuf chain! */
+    ip_hdr_offset = SIZEOF_ETH_HDR;
+    ethhdr = (struct eth_hdr *) p->payload;
+#if ETHARP_SUPPORT_VLAN
+    if (type == PP_HTONS(ETHTYPE_VLAN)) {
+      type = ((struct eth_vlan_hdr*)(((uintptr_t)ethhdr) + SIZEOF_ETH_HDR))->tpid;
+      ip_hdr_offset = SIZEOF_ETH_HDR + SIZEOF_VLAN_HDR;
+    }
+#endif /* ETHARP_SUPPORT_VLAN */
+    /* TODO: PPP support? */
+
+    switch (ethhdr->type) {
+    case PP_HTONS(ETHTYPE_IP):
+      iphdr = (struct ip_hdr *)((uintptr_t) p->payload + ip_hdr_offset);
+      if (IPH_PROTO(iphdr) != IP_PROTO_TCP) {
+	goto xmit; /* IPv4 but not TCP */
+      }
+#ifdef CONFIG_NETFRONT_GSO
+      tso = XEN_NETIF_GSO_TYPE_TCPV4; /* TCPv4 segmentation and checksum offloading */
+#endif /* CONFIG_NETFRONT_GSO */
+#ifdef CONFIG_LWIP_BATCHTX
+      /* push only when FIN, RST, PSH, or URG flag is set */
+      tcphdr = (struct tcp_hdr *)((uintptr_t) p->payload + ip_hdr_offset + (IPH_HL(iphdr) * 4));
+      push = (TCPH_FLAGS(tcphdr) & (TCP_FIN | TCP_RST | TCP_PSH | TCP_URG));
+#endif /* CONFIG_LWIP_BATCHTX */
+      break;
+
+#if IPV6_SUPPORT
+    case PP_HTONS(ETHTYPE_IPV6):
+      if (IP6H_NEXTH((struct ip6_hdr *)((uintptr_t) p->payload + ip_hdr_offset)) != IP6_NEXTH_TCP)
+	goto xmit; /* IPv6 but not TCP */
+#ifdef CONFIG_NETFRONT_GSO
+      tso = XEN_NETIF_GSO_TYPE_TCPV6; /* TCPv6 segmentation and checksum offloading */
+#endif /* CONFIG_NETFRONT_GSO */
+#ifdef CONFIG_LWIP_BATCHTX
+      /* push only when FIN, RST, PSH, or URG flag is set */
+      #error "TSOv6 is not yet supported. Please add it"
+      tcphdr = NULL;
+      push = (TCPH_FLAGS(tcphdr) & (TCP_FIN | TCP_RST | TCP_PSH | TCP_URG));
+#endif /* CONFIG_LWIP_BATCHTX */
+      break;
+#endif /* IPV6_SUPPORT */
+
+    default:
+      break; /* non-IP packet */
+    }
+#endif /* defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX */
+
+ xmit:
 #if ETH_PAD_SIZE
     pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
 #endif
-
-    if (!p->next) {
-        /* fast case: no further buffer allocation needed */
-        netfront_xmit(nfi->dev, (unsigned char *) p->payload, p->len);
-    } else {
-        err = netfront_xmit_pbuf(nfi->dev, p);
+#ifdef CONFIG_LWIP_WAITFORTX
+ retry:
+#endif /* CONFIG_LWIP_WAITFORTX */
+    err = netfront_xmit_pbuf(nfi->dev, p, tso, push);
+    if (unlikely(err != ERR_OK)) {
+      LINK_STATS_INC(link.memerr);
+#ifdef CONFIG_LWIP_WAITFORTX
+      LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: retry failed transmission\n"));
+      goto retry;
+#else
+      LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: transmission failed, dropping packet: %d\n", err));
+      LINK_STATS_INC(link.drop);
+#endif /* CONFIG_LWIP_WAITFORTX */
     }
+    LINK_STATS_INC(link.xmit);
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
@@ -166,16 +277,16 @@ static inline void netfrontif_input(struct pbuf *p, struct netif *netif)
 			      p->tot_len));
 
     ethhdr = p->payload;
-    switch (htons(ethhdr->type)) {
+    switch (ethhdr->type) {
     /* IP or ARP packet? */
-    case ETHTYPE_IP:
+    case PP_HTONS(ETHTYPE_IP):
 #if IPV6_SUPPORT
-    case ETHTYPE_IPV6:
+    case PP_HTONS(ETHTYPE_IPV6):
 #endif
-    case ETHTYPE_ARP:
+    case PP_HTONS(ETHTYPE_ARP):
 #if PPPOE_SUPPORT
-    case ETHTYPE_PPPOEDISC:
-    case ETHTYPE_PPPOE:
+    case PP_HTONS(ETHTYPE_PPPOEDISC):
+    case PP_HTONS(ETHTYPE_PPPOE):
 #endif
     /* packet will be sent to lwIP stack for processing */
     /* Note: On threaded configuration packet buffer will be enqueued on

@@ -215,25 +215,26 @@ void lwip_free(void *ptr);
 /*
  * Checksum options
  */
-#ifdef CONFIG_LWIP_CHECKSUM_NOGEN
 #define CHECKSUM_GEN_IP 1
 #define CHECKSUM_GEN_IP6 1
 #define CHECKSUM_GEN_ICMP 1
 #define CHECKSUM_GEN_ICMP6 1
 #define CHECKSUM_GEN_UDP 1
 #define CHECKSUM_GEN_TCP 1
-#define LWIP_CHECKSUM_ON_COPY 0
-#else
+#ifdef CONFIG_NETFRONT_GSO
+#define LWIP_CHECKSUM_PARTIAL 1 /* TSO on Xen requires partial checksumming (for checksum ofloading) */
+#define LWIP_CHECKSUM_ON_COPY 0 /* checksum on copy is not supported when TCO is enabled */
+#else /* CONFIG_NETFRONT_GSO */
 #define LWIP_CHECKSUM_ON_COPY 1
-#endif
-
-#ifdef CONFIG_LWIP_CHECKSUM_NOCHECK
+#endif /* CONFIG_NETFRONT_GSO */
+/* Checksum checking is offloaded to the host (lwip-net is a virtual interface)
+ * TODO: better solution is when netfront forwards checksum flags to lwIP */
 #define CHECKSUM_CHECK_IP 0
 #define CHECKSUM_CHECK_UDP 0
 #define CHECKSUM_CHECK_TCP 0
 #define CHECKSUM_CHECK_ICMP 0
 #define CHECKSUM_CHECK_ICMP6 0
-#endif
+#define CHECKSUM_CHECK_TCP 0
 
 /*
  * Debugging options
