@@ -999,7 +999,7 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 {
 	xenbus_transaction_t xbt;
 	char* err = NULL;
-	char* message=NULL;
+	const char* message=NULL;
 	struct netif_tx_sring *txs;
 	struct netif_rx_sring *rxs;
 	int feature_split_evtchn;
