@@ -53,6 +53,9 @@
 #endif /* CONFIG_LWIP_HEAP_ONLY / CONFIG_LWIP_POOLS_ONLY */
 
 #define MEMP_SEPARATE_POOLS 1 /* for each pool use a separate aray in data segment */
+#ifdef CONFIG_LWIP_POOLS_ON_HEAP
+#define MEMP_POOLS_ON_HEAP 1 /* allocate pools on system's heap */
+#endif
 #define MEM_ALIGNMENT 4
 
 #if MEM_USE_POOLS
