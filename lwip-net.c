@@ -168,6 +168,9 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 #ifdef CONFIG_LWIP_BATCHTX
     const struct tcp_hdr *tcphdr;
 #endif /* CONFIG_LWIP_BATCHTX */
+#if defined CONFIG_LWIP_WAITFORTX && defined CONFIG_DEBUG_LWIP_WAITFORTX
+    register unsigned nb_retries = 0;
+#endif /* defined CONFIG_LWIP_WAITFORTX && defined CONFIG_DEBUG_LWIP_WAITFORTX */
     int tso = 0;
     int push = 1;
     err_t err;
@@ -239,7 +242,12 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
       LINK_STATS_INC(link.memerr);
 #ifdef CONFIG_LWIP_WAITFORTX
       LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: retry failed transmission\n"));
+#ifdef CONFIG_DEBUG_LWIP_WAITFORTX
+      ++nb_retries;
+      if (nb_retries % 100000 == 0)
+	printk("lwip-net: %c%c: tried to retransmit %"PRIu16" bytes %d times, still fails (%d): backend still responding?\n", netif->name[0], netif->name[1], p->tot_len, nb_retries, err);
       goto retry;
+#endif /* CONFIG_DEBUG_LWIP_WAITFORTX */
 #else
       LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: transmission failed, dropping packet: %d\n", err));
       LINK_STATS_INC(link.drop);
