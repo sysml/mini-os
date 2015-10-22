@@ -633,7 +633,10 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 	int flags;
 
 	local_irq_save(flags);
-	down(&dev->tx_sem);
+	if (unlikely(!trydown(&dev->tx_sem))) {
+		local_irq_restore(flags);
+		return NULL; /* we run out of available pages */
+	}
 	id = get_id_from_freelist(dev->tx_freelist);
 	buf = &dev->tx_buffers[id];
 	local_irq_restore(flags);
@@ -682,12 +685,12 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 		goto out;
 
 	tx = netfront_get_page(dev);
+	ASSERT(tx != NULL);
 	page = dev->tx_buffers[tx->id].page;
 	NETIF_MEMCPY(page, data, len);
 	tx->flags |= (NETTXF_data_validated);
 	tx->size = len;
 
-	wmb();
 	netfront_xmit_notify(dev);
 	dprintk("tx: raw %d\n", len);
 
@@ -706,36 +709,47 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 							    struct pbuf *p, int *slots)
 {
 	void *page = dev->tx_buffers[tx->id].page;
-	unsigned offset = tx->size;
-	unsigned q_ofs = 0;
-	unsigned len = p->len;
-	unsigned size = min(p->len, (PAGE_SIZE - offset));
+	unsigned page_off, page_left;
+	unsigned p_off, p_left;
+	unsigned len;
 
-	dprintk("tx: make: p->len %u size %u offset %u\n",
-				p->len, size, offset);
-	while(len > 0) {
-		if (unlikely(!size || (offset + size > PAGE_SIZE))) {
-			offset = 0;
+	(*slots)  = 0;
+	p_off     = 0;
+	p_left    = p->len;
+	page_off  = tx->size;
+	page_left = (PAGE_SIZE) - page_off;
+	for (;;) {
+		len = min(page_left, p_left);
+
+		dprintk("tx: make_txreqs: slot %3u, id %3u: page@%12p, page_off: %4u page_left: %4u <-%-4u bytes-- p@%12p, p_off: %4u, p_left: %4u\n",
+			*slots, tx->id, page, page_off, page_left, len, p->payload, p_off, p_left);
+		NETIF_MEMCPY((void *)(((uintptr_t) page) + page_off),
+			     (void *)(((uintptr_t) p->payload) + p_off),
+			     len);
+		p_off     += len;
+		p_left    -= len;
+		tx->size  += len;
+		page_off  += len;
+		page_left -= len;
+
+		if (!p_left) {
+			if (!p->next)
+				break; /* we are done processing this pbuf chain */
+			p = p->next;
+			p_off  = 0;
+			p_left = p->len;
+		}
+		if (!page_left) {
 			tx->flags |= NETTXF_more_data;
-			tx = netfront_get_page(dev);
+			tx = netfront_get_page(dev); /* next page */
+			ASSERT(tx != NULL); /* out of memory
+					       -> this should have been catched before calling this function */
 			page = dev->tx_buffers[tx->id].page;
+			page_off = 0;
+			page_left = PAGE_SIZE;
 			(*slots)++;
 		}
-
-		size = min(PAGE_SIZE - offset, len);
-
-		dprintk("tx: make: size %u len %u offset %u q_offset %u id %u\n",
-				size, len, offset, q_ofs, tx->id);
-
-		NETIF_MEMCPY(page + offset, p->payload + q_ofs, size);
-		tx->size += size;
-
-		len -= size;
-		offset += size;
-		page += size;
-		q_ofs += size;
 	}
-
 	return tx;
 }
 
@@ -775,6 +789,7 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int tso, int 
 
 	/* Set extras if packet is GSO kind */
 	first_tx = netfront_get_page(dev);
+	ASSERT(first_tx != NULL);
 #ifdef CONFIG_NETFRONT_GSO
 	if (gso) {
 		first_tx->flags |= NETTXF_extra_info;
@@ -795,16 +810,12 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int tso, int 
 #endif /* CONFIG_NETFRONT_GSO */
 
 	/* Make TX requests for the pbuf */
-	tx = first_tx;
-	for (q = p; q != NULL; q = q->next)
-		tx = netfront_make_txreqs(dev, tx, q, &used);
+	tx = netfront_make_txreqs(dev, first_tx, p, &used);
+	ASSERT(slots >= used);       /* we should have taken at most the number slots we required */
+	first_tx->size = p->tot_len; /* first request contains total size of packet */
 
-	/* First request contains total size of packet */
-	first_tx->size = p->tot_len;
-
-	wmb();
 	push |= (((dev)->tx.req_prod_pvt - (dev)->tx.rsp_cons) <= NET_TX_RING_SIZE / 2);
-	if (push != 0)
+	if (push)
 		netfront_xmit_push(dev);
 
 	dprintk("tx: %c%c%c %u bytes (%u slots)\n", gso ? 'S' : '-', tso ? 'C' : '-', push ? 'P' : '-', p->tot_len, slots);
