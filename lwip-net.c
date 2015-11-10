@@ -86,6 +86,8 @@
 #include "lwip/pbuf.h"
 #include <lwip/stats.h>
 #include <lwip/snmp.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 #define NETFRONTIF_NPREFIX 'e'
 #define NETFRONTIF_SPEED 10000000000ul     /* 10 GBit/s */
@@ -294,9 +296,26 @@ static void netfrontif_thread(void *argp)
     struct netfrontif *nfi = netif->state;
     struct netfront_dev *dev = nfi->dev;
 
+#ifdef CONFIG_SELECT_POLL
+    int fd;
+    fd_set rfds;
+    struct timeval tv;
+
+    fd = netfrontif_fd(netif);
+    FD_ZERO(&rfds);
+
+    tv.tv_sec = CONFIG_LWIP_SELECT_TIMEOUT;
+    tv.tv_usec = 0;
+#endif
+
     while (likely(!nfi->_thread_exit)) {
-        network_rx(dev);
+#ifdef CONFIG_SELECT_POLL
+        FD_SET(fd, &rfds);
+        select(fd + 1, &rfds, NULL, NULL, &tv);
+#else
         schedule();
+#endif
+        network_rx(dev);
     }
 
     nfi->_thread_exit = 0;

@@ -1,7 +1,15 @@
 #include <mini-os/wait.h>
 #include <xen/io/blkif.h>
 #include <mini-os/types.h>
+
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+#define __LOG2_8BIT(x)  (8 - 90/(((x)/4+14)|1) - 2/((x)/2+1))
+#define BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST \
+    (1 << (__LOG2_8BIT(BLKIF_MAX_SEGMENTS_PER_REQUEST)))
+#endif
+
 struct blkfront_dev;
+struct blk_buffer;
 struct blkfront_aiocb
 {
     struct blkfront_dev *aio_dev;
@@ -12,7 +20,11 @@ struct blkfront_aiocb
     uint8_t is_write;
     void *data;
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    struct blk_buffer *prst_buffer[BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST];
+#else
     grant_ref_t gref[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+#endif
     int n;
 
     void (*aio_cb)(struct blkfront_aiocb *aiocb, int ret);
@@ -41,6 +53,11 @@ int blkfront_posix_rwop(int fd, uint8_t* buf, size_t count, int write);
 int blkfront_posix_fstat(int fd, struct stat* buf);
 #endif
 void blkfront_aio(struct blkfront_aiocb *aiocbp, int write);
+void blkfront_aio_nosched(struct blkfront_aiocb *aiocbp, int write);
+void blkfront_wait_slot(struct blkfront_dev *dev);
+void blkfront_wait_slot_nosched(struct blkfront_dev *dev);
+int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write);
+void blkfront_aio_submit(struct blkfront_dev *dev);
 #define blkfront_aio_read(aiocbp) blkfront_aio(aiocbp, 0)
 #define blkfront_aio_write(aiocbp) blkfront_aio(aiocbp, 1)
 void blkfront_io(struct blkfront_aiocb *aiocbp, int write);

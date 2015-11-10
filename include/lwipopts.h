@@ -137,9 +137,21 @@ void lwip_free(void *ptr);
 
 #define TCP_MSS 1460
 #define TCP_WND 65535 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
-#define LWIP_WND_SCALE 0 /* 0=disable/1=enable TCP window scaling */
-//#define TCP_RCV_SCALE 0 /* scaling factor 0..14 */
+#if defined CONFIG_LWIP_WND_SCALE
+#define LWIP_WND_SCALE 1
+#else
+#define LWIP_WND_SCALE 0
+#endif
+#if LWIP_WND_SCALE
+#if defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1
+#define TCP_RCV_SCALE CONFIG_LWIP_WND_SCALE_FACTOR /* scaling factor 0..14 */
+#else
+#define TCP_RCV_SCALE 3
+#endif
+#define TCP_SND_BUF ((TCP_WND << TCP_RCV_SCALE) * 2)
+#else
 #define TCP_SND_BUF (TCP_WND * 2)
+#endif
 #define TCP_SND_QUEUELEN (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_QUEUE_OOSEQ 1
 #define MEMP_NUM_TCP_SEG CONFIG_LWIP_PBUF_NUM_REF

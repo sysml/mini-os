@@ -99,6 +99,7 @@ struct file files[NOFILE] = {
 };
 
 DECLARE_WAIT_QUEUE_HEAD(event_queue);
+DECLARE_WAIT_QUEUE_HEAD(pipe_queue);
 
 int alloc_fd(enum fd_type type)
 {
@@ -309,6 +310,10 @@ int read(int fd, void *buf, size_t nbytes)
 	    return tpm_tis_posix_read(fd, buf, nbytes);
         }
 #endif
+	case FTYPE_PIPE: {
+		files[fd].read = 0;
+		return 0;
+	}
 	default:
 	    break;
     }
@@ -353,6 +358,9 @@ int write(int fd, const void *buf, size_t nbytes)
 	case FTYPE_TPM_TIS:
 	    return tpm_tis_posix_write(fd, buf, nbytes);
 #endif
+	case FTYPE_PIPE:
+	    files[fd].read = 1;
+	    return 0;
 	default:
 	    break;
     }
@@ -593,8 +601,10 @@ int fcntl(int fd, int cmd, ...)
     va_end(ap);
 
     switch (cmd) {
-#ifdef HAVE_LWIP
 	case F_SETFL:
+	    if (files[fd].type == FTYPE_PIPE)
+		return 0;
+#ifdef HAVE_LWIP
 	    if (files[fd].type == FTYPE_SOCKET && !(arg & ~O_NONBLOCK)) {
 		/* Only flag supported: non-blocking mode */
 		uint32_t nblock = !!(arg & O_NONBLOCK);
@@ -602,6 +612,9 @@ int fcntl(int fd, int cmd, ...)
 	    }
 	    /* Fallthrough */
 #endif
+	case F_SETFD:
+	    if (files[fd].type == FTYPE_PIPE)
+		return 0;
 	default:
 	    printk("fcntl(%d, %d, %lx/%lo)\n", fd, cmd, arg, arg);
 	    errno = ENOSYS;
@@ -708,8 +721,9 @@ static void dump_pollfds(struct pollfd *pfd, int nfds, int timeout)
 #define dump_pollfds(pfds, nfds, timeout)
 #endif
 
+#define GET_SELECT_MASK(_FTYPE) ((unsigned long)1 << _FTYPE)
 /* Just poll without blocking */
-static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds)
+static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, unsigned long *mask)
 {
     int i, n = 0;
 #ifdef HAVE_LWIP
@@ -768,8 +782,10 @@ static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
 	    if (FD_ISSET(i, readfds)) {
                 if (xencons_ring_avail(files[i].cons.dev))
 		    n++;
-		else
+		else {
+		    *mask |= GET_SELECT_MASK(files[i].type);
 		    FD_CLR(i, readfds);
+		}
             }
 	    if (FD_ISSET(i, writefds))
                 n++;
@@ -780,8 +796,10 @@ static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
 	    if (FD_ISSET(i, readfds)) {
                 if (files[i].xenbus.events)
 		    n++;
-		else
+		else {
+		    *mask |= GET_SELECT_MASK(files[i].type);
 		    FD_CLR(i, readfds);
+		}
 	    }
 	    FD_CLR(i, writefds);
 	    FD_CLR(i, exceptfds);
@@ -795,8 +813,10 @@ static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
 	    if (FD_ISSET(i, readfds)) {
 		if (files[i].read)
 		    n++;
-		else
+		else {
+		    *mask |= GET_SELECT_MASK(files[i].type);
 		    FD_CLR(i, readfds);
+		}
 	    }
 	    FD_CLR(i, writefds);
 	    FD_CLR(i, exceptfds);
@@ -824,6 +844,18 @@ static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
             }
 	    break;
 #endif
+	case FTYPE_PIPE:
+	    if (FD_ISSET(i, readfds)) {
+		if (files[i].read)
+		    n++;
+		else {
+		    *mask |= GET_SELECT_MASK(files[i].type);
+		    FD_CLR(i, readfds);
+		}
+	    }
+	    FD_CLR(i, writefds);
+	    FD_CLR(i, exceptfds);
+	    break;
 	}
 #ifdef LIBC_VERBOSE
 	if (FD_ISSET(i, readfds))
@@ -867,10 +899,11 @@ static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
 int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 	struct timeval *timeout)
 {
-    int n, ret;
+    int n, tout, ret;
+    unsigned long mask;
     fd_set myread, mywrite, myexcept;
-    struct thread *thread = get_current();
-    s_time_t start = NOW(), stop;
+    s_time_t start, diff, stop;
+    struct thread *curr;
 #ifdef CONFIG_NETFRONT
     DEFINE_WAIT(netfront_w);
 #endif
@@ -885,131 +918,98 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
     DEFINE_WAIT(kbdfront_w);
 #endif
     DEFINE_WAIT(console_w);
+    DEFINE_WAIT(pipe_w);
 
-    assert(thread == main_thread);
+    start = NOW();
+    curr = get_current();
+    n = 0;
+    tout = 0;
 
-    DEBUG("select(%d, ", nfds);
-    dump_set(nfds, readfds, writefds, exceptfds, timeout);
-    DEBUG(");\n");
-
-    if (timeout)
-	stop = start + SECONDS(timeout->tv_sec) + timeout->tv_usec * 1000;
-    else
-	/* just make gcc happy */
-	stop = start;
-
-    /* Tell people we're going to sleep before looking at what they are
-     * saying, hence letting them wake us if events happen between here and
-     * schedule() */
-#ifdef CONFIG_NETFRONT
-    add_waiter(netfront_w, netfront_queue);
-#endif
-    add_waiter(event_w, event_queue);
-#ifdef CONFIG_BLKFRONT
-    add_waiter(blkfront_w, blkfront_queue);
-#endif
-#ifdef CONFIG_XENBUS
-    add_waiter(xenbus_watch_w, xenbus_watch_queue);
-#endif
-#ifdef CONFIG_KBDFRONT
-    add_waiter(kbdfront_w, kbdfront_queue);
-#endif
-    add_waiter(console_w, console_queue);
-
-    if (readfds)
-        myread = *readfds;
-    else
-        FD_ZERO(&myread);
-    if (writefds)
-        mywrite = *writefds;
-    else
-        FD_ZERO(&mywrite);
-    if (exceptfds)
-        myexcept = *exceptfds;
-    else
-        FD_ZERO(&myexcept);
-
-    DEBUG("polling ");
-    dump_set(nfds, &myread, &mywrite, &myexcept, timeout);
-    DEBUG("\n");
-    n = select_poll(nfds, &myread, &mywrite, &myexcept);
-
-    if (n) {
-	dump_set(nfds, readfds, writefds, exceptfds, timeout);
-	if (readfds)
-	    *readfds = myread;
-	if (writefds)
-	    *writefds = mywrite;
-	if (exceptfds)
-	    *exceptfds = myexcept;
-	DEBUG(" -> ");
-	dump_set(nfds, readfds, writefds, exceptfds, timeout);
-	DEBUG("\n");
-	wake(thread);
-	ret = n;
-	goto out;
-    }
-    if (timeout && NOW() >= stop) {
-	if (readfds)
-	    FD_ZERO(readfds);
-	if (writefds)
-	    FD_ZERO(writefds);
-	if (exceptfds)
-	    FD_ZERO(exceptfds);
-	timeout->tv_sec = 0;
-	timeout->tv_usec = 0;
-	wake(thread);
-	ret = 0;
-	goto out;
-    }
-
-    if (timeout)
-	thread->wakeup_time = stop;
-    schedule();
-
-    if (readfds)
-        myread = *readfds;
-    else
-        FD_ZERO(&myread);
-    if (writefds)
-        mywrite = *writefds;
-    else
-        FD_ZERO(&mywrite);
-    if (exceptfds)
-        myexcept = *exceptfds;
-    else
-        FD_ZERO(&myexcept);
-
-    n = select_poll(nfds, &myread, &mywrite, &myexcept);
-
-    if (n) {
-	if (readfds)
-	    *readfds = myread;
-	if (writefds)
-	    *writefds = mywrite;
-	if (exceptfds)
-	    *exceptfds = myexcept;
-	ret = n;
-	goto out;
-    }
-    errno = EINTR;
     ret = -1;
-
-out:
+    for (;;) {
+        if (tout) {
+            ret = n;
+            break;
+        }
+        if (readfds)
+            memcpy(&myread, readfds, sizeof(fd_set));
+        if (writefds)
+            memcpy(&mywrite, writefds, sizeof(fd_set));
+        if (exceptfds)
+            memcpy(&myexcept, exceptfds, sizeof(fd_set));
+        mask = 0;
+        n = select_poll(nfds, &myread, &mywrite, &myexcept, &mask);
+        if (n <= 0) { // Sleep until the timeout
 #ifdef CONFIG_NETFRONT
-    remove_waiter(netfront_w, netfront_queue);
+            if (mask & GET_SELECT_MASK(FTYPE_TAP))
+                add_waiter(netfront_w, netfront_queue);
 #endif
-    remove_waiter(event_w, event_queue);
+            if (mask & GET_SELECT_MASK(FTYPE_EVTCHN))
+                add_waiter(event_w, event_queue);
 #ifdef CONFIG_BLKFRONT
-    remove_waiter(blkfront_w, blkfront_queue);
+            if (mask & GET_SELECT_MASK(FTYPE_BLK))
+                add_waiter(blkfront_w, blkfront_queue);
 #endif
 #ifdef CONFIG_XENBUS
-    remove_waiter(xenbus_watch_w, xenbus_watch_queue);
+            if (mask & GET_SELECT_MASK(FTYPE_XENBUS))
+                add_waiter(xenbus_watch_w, xenbus_watch_queue);
 #endif
 #ifdef CONFIG_KBDFRONT
-    remove_waiter(kbdfront_w, kbdfront_queue);
+            if (mask & GET_SELECT_MASK(FTYPE_KBD))
+                add_waiter(kbdfront_w, kbdfront_queue);
 #endif
-    remove_waiter(console_w, console_queue);
+            if (mask & GET_SELECT_MASK(FTYPE_CONSOLE))
+                add_waiter(console_w, console_queue);
+
+            if (mask & GET_SELECT_MASK(FTYPE_PIPE))
+                add_waiter(pipe_w, pipe_queue);
+
+            if (timeout) {
+                diff = SECONDS(timeout->tv_sec) + timeout->tv_usec * 1000;
+                stop = start + diff;
+            } else {
+                diff = 0;
+                stop = start;
+            }
+            curr->wakeup_time = stop;
+            schedule();
+            if (NOW() > stop) {
+                tout = 1;
+            }
+#ifdef CONFIG_NETFRONT
+            if (mask & GET_SELECT_MASK(FTYPE_TAP))
+                remove_waiter(netfront_w, netfront_queue);
+#endif
+            if (mask & GET_SELECT_MASK(FTYPE_EVTCHN))
+                remove_waiter(event_w, event_queue);
+#ifdef CONFIG_BLKFRONT
+            if (mask & GET_SELECT_MASK(FTYPE_BLK))
+                remove_waiter(blkfront_w, blkfront_queue);
+#endif
+#ifdef CONFIG_XENBUS
+            if (mask & GET_SELECT_MASK(FTYPE_XENBUS))
+                remove_waiter(xenbus_watch_w, xenbus_watch_queue);
+#endif
+#ifdef CONFIG_KBDFRONT
+            if (mask & GET_SELECT_MASK(FTYPE_KBD))
+                remove_waiter(kbdfront_w, kbdfront_queue);
+#endif
+            if (mask & GET_SELECT_MASK(FTYPE_CONSOLE))
+                remove_waiter(console_w, console_queue);
+
+            if (mask & GET_SELECT_MASK(FTYPE_PIPE))
+                remove_waiter(pipe_w, pipe_queue);
+        } else { // Any events occur, out from select
+            ret = n;
+            break;
+        }
+    }
+    if (readfds)
+        memcpy(readfds, &myread, sizeof(fd_set));
+    if (writefds)
+        memcpy(writefds, &mywrite, sizeof(fd_set));
+    if (exceptfds)
+        memcpy(exceptfds, &myexcept, sizeof(fd_set));
     return ret;
 }
 
@@ -1440,6 +1440,20 @@ int nice(int inc)
     return 0;
 }
 
+int pipe(int pipefd[2])
+{
+    int fd[2];
+    fd[0] = alloc_fd(FTYPE_PIPE);
+    fd[1] = alloc_fd(FTYPE_PIPE);
+    if (fd[0] < 0 && fd[1] < 0) {
+        return -ENFILE;
+    }
+    pipefd[0] = fd[0];
+    pipefd[1] = fd[1];
+    files[fd[0]].read = 0;
+    files[fd[1]].read = 0;
+    return 0;
+}
 
 /* Not supported by FS yet.  */
 unsupported_function_crash(link);
@@ -1468,7 +1482,6 @@ unsupported_function(int, sigaltstack, -1);
 unsupported_function_crash(kill);
 
 /* Unsupported */
-unsupported_function_crash(pipe);
 unsupported_function_crash(fork);
 unsupported_function_crash(execv);
 unsupported_function_crash(execve);

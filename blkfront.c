@@ -16,6 +16,10 @@
 #include <mini-os/blkfront.h>
 #include <mini-os/lib.h>
 #include <fcntl.h>
+#if (defined CONFIG_BLKFRONT_PERSISTENT_GRANTS) && (defined __SSE2__)
+#include <xmmintrin.h> /* SSE */
+#include <emmintrin.h> /* SSE2 */
+#endif
 
 #ifndef HAVE_LIBC
 #define strtoul simple_strtoul
@@ -33,11 +37,18 @@ DECLARE_WAIT_QUEUE_HEAD(blkfront_queue);
 
 #define BLK_RING_SIZE __RING_SIZE((struct blkif_sring *)0, PAGE_SIZE)
 #define GRANT_INVALID_REF 0
-
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+#define BLK_BUFFER_PAGES_N BLK_RING_SIZE * BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST
+#else
+#define BLK_BUFFER_PAGES_N BLK_RING_SIZE * BLKIF_MAX_SEGMENTS_PER_REQUEST
+#endif
 
 struct blk_buffer {
     void* page;
     grant_ref_t gref;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    int inflight;
+#endif
 };
 
 struct blkfront_dev {
@@ -47,6 +58,9 @@ struct blkfront_dev {
     grant_ref_t ring_ref;
     evtchn_port_t evtchn;
     blkif_vdev_t handle;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    struct blk_buffer *pt_pool;
+#endif
 
     char *nodename;
     char *backend;
@@ -73,6 +87,18 @@ void blkfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 
 static void free_blkfront(struct blkfront_dev *dev)
 {
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+	int iter;
+	if (dev->pt_pool != NULL) {
+		for (iter = 0; iter < BLK_BUFFER_PAGES_N; iter++) {
+			if (dev->pt_pool[iter].inflight)
+				printk("gnttab_end_access %d -- %u\n", iter, dev->pt_pool[iter].gref);
+			gnttab_end_access(dev->pt_pool[iter].gref);
+			free_page(dev->pt_pool[iter].page);
+		}
+		free(dev->pt_pool);
+	}
+#endif
     mask_evtchn(dev->evtchn);
 
     free(dev->backend);
@@ -121,6 +147,20 @@ struct blkfront_dev *init_blkfront(char *_nodename, struct blkfront_info *info)
     SHARED_RING_INIT(s);
     FRONT_RING_INIT(&dev->ring, s, PAGE_SIZE);
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    int iter;
+    dev->pt_pool = xmalloc_array(struct blk_buffer, BLK_BUFFER_PAGES_N);
+    for (iter = 0; iter < BLK_BUFFER_PAGES_N; iter++) {
+        dev->pt_pool[iter].page = (char*)alloc_page();
+        *(char*)(dev->pt_pool[iter].page) = 0; /* Trigger CoW if needed */
+        barrier();
+        dev->pt_pool[iter].gref = gnttab_grant_access(dev->dom, virt_to_mfn(dev->pt_pool[iter].page), 0);
+        dev->pt_pool[iter].inflight = 0;
+    }
+    printk("persistent grants: %d pages allocated, %d KB overhead, max %d pages per request\n",
+           BLK_BUFFER_PAGES_N, (BLK_BUFFER_PAGES_N * (sizeof(struct blk_buffer) + PAGE_SIZE)) / 1024, BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST);
+#endif
+
     dev->ring_ref = gnttab_grant_access(dev->dom,virt_to_mfn(s),0);
 
     dev->events = NULL;
@@ -132,6 +172,13 @@ again:
         free(err);
     }
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    err = xenbus_printf(xbt, nodename, "feature-persistent", "%u", 1);
+    if (err) {
+        message = "writing feature-persistent";
+        goto abort_transaction;
+    }
+#endif
     err = xenbus_printf(xbt, nodename, "ring-ref","%u",
                 dev->ring_ref);
     if (err) {
@@ -226,6 +273,20 @@ done:
         snprintf(path, sizeof(path), "%s/sector-size", dev->backend);
         dev->info.sector_size = xenbus_read_integer(path);
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+        snprintf(path, sizeof(path), "%s/feature-persistent", dev->backend);
+        if (xenbus_read_integer(path) != 1) {
+            printk("backend does not support persistent grants\n");
+            goto error;
+        }
+
+        /* fast copy only usable if devices sector size is multiple of 256 */
+        if (dev->info.sector_size & 0xFF) {
+            printk("unsupported device sector size: %d\n", dev->info.sector_size);
+            goto error;
+        }
+#endif
+
         snprintf(path, sizeof(path), "%s/feature-barrier", dev->backend);
         dev->info.barrier = xenbus_read_integer(path);
 
@@ -309,7 +370,119 @@ close:
         free_blkfront(dev);
 }
 
-static void blkfront_wait_slot(struct blkfront_dev *dev)
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+/* fast memcpy version for 256-bytes aligned buffers
+ * Note: len has to be a multiple of 256  */
+#include <inttypes.h>
+static inline void _fmemcpy256(void *dst, const void *src, size_t len)
+{
+#if (defined __SSE2__) && (!defined DEBUG_BUILD)
+#warning "SSE2-based memcpy enabled for persistent grants"
+#define __ptr_offset(ptr, size, idx) \
+  ((uintptr_t)(ptr) + ((idx) * (size)))
+
+    __m128i s128;
+
+    ASSERT(((uintptr_t)src & 0x0F) == 0);
+    ASSERT(((uintptr_t)dst & 0x0F) == 0);
+    ASSERT((len & 0xFF) == 0);
+
+    while (len) {
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 0)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 0)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 1)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 1)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 2)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 2)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 3)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 3)), s128);
+
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 4)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 4)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 5)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 5)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 6)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 6)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 7)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 7)), s128);
+
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 8)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 8)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 9)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 9)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 10)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 10)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 11)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 11)), s128);
+
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 12)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 12)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 13)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 13)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 14)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 14)), s128);
+        s128 = _mm_load_si128((const __m128i *)(__ptr_offset(src, 16, 15)));
+        _mm_store_si128((__m128i *)(__ptr_offset(dst, 16, 15)), s128);
+
+        src = (void *)((uintptr_t)src + 256);
+        dst = (void *)((uintptr_t)dst + 256);
+        len -= 256;
+    }
+#else
+    register const uint64_t *s64;
+    register uint64_t *d64;
+
+    ASSERT(((uintptr_t)src & 0x07) == 0);
+    ASSERT(((uintptr_t)dst & 0x07) == 0);
+    ASSERT((len & 0xFF) == 0);
+
+    s64 = (const uint64_t *) src;
+    d64 = (uint64_t *) dst;
+
+    while (len) {
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+        (*d64++) = (*s64++);
+
+        len -= 256;
+    }
+#endif
+}
+#endif
+
+void blkfront_wait_slot(struct blkfront_dev *dev)
 {
     /* Wait for a slot */
     if (RING_FULL(&dev->ring)) {
@@ -331,15 +504,55 @@ static void blkfront_wait_slot(struct blkfront_dev *dev)
     }
 }
 
+void blkfront_wait_slot_nosched(struct blkfront_dev *dev)
+{
+    /* Wait for a slot */
+    if (RING_FULL(&dev->ring)) {
+	unsigned long flags;
+	local_irq_save(flags);
+	while (1) {
+	    blkfront_aio_poll(dev);
+	    if (!RING_FULL(&dev->ring))
+		break;
+	    local_irq_restore(flags);
+	    local_irq_save(flags);
+	}
+	local_irq_restore(flags);
+    }
+}
+
 /* Issue an aio */
 void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
 {
     struct blkfront_dev *dev = aiocbp->aio_dev;
+
+    blkfront_wait_slot(dev);
+    blkfront_aio_enqueue(aiocbp, write);
+    blkfront_aio_submit(dev);
+}
+
+void blkfront_aio_nosched(struct blkfront_aiocb *aiocbp, int write)
+{
+    struct blkfront_dev *dev = aiocbp->aio_dev;
+
+    blkfront_wait_slot_nosched(dev);
+    blkfront_aio_enqueue(aiocbp, write);
+    blkfront_aio_submit(dev);
+}
+
+int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write)
+{
+    struct blkfront_dev *dev = aiocbp->aio_dev;
     struct blkif_request *req;
     RING_IDX i;
-    int notify;
     int n, j;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    struct blk_buffer *buffer;
+    int p;
+#else
     uintptr_t start, end;
+#endif
+    uintptr_t data;
 
     // Can't io at non-sector-aligned location
     ASSERT(!(aiocbp->aio_offset & (dev->info.sector_size-1)));
@@ -348,15 +561,25 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
     // Can't io non-sector-aligned buffer
     ASSERT(!((uintptr_t) aiocbp->aio_buf & (dev->info.sector_size-1)));
 
+#if CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    aiocbp->n = n = (aiocbp->aio_nbytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
+#else
     start = (uintptr_t)aiocbp->aio_buf & PAGE_MASK;
     end = ((uintptr_t)aiocbp->aio_buf + aiocbp->aio_nbytes + PAGE_SIZE - 1) & PAGE_MASK;
     aiocbp->n = n = (end - start) / PAGE_SIZE;
+#endif
 
     /* qemu's IDE max multsect is 16 (8KB) and SCSI max DMA was set to 32KB,
-     * so max 44KB can't happen */
+     * so max 44KB can't happen. on persistent grants, we will not have an
+     * offset thus max 32KB can happen there */
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    ASSERT(n <= BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST);
+#else
     ASSERT(n <= BLKIF_MAX_SEGMENTS_PER_REQUEST);
+#endif
 
-    blkfront_wait_slot(dev);
+    if (RING_FULL(&dev->ring))
+        return -EBUSY;
     i = dev->ring.req_prod_pvt;
     req = RING_GET_REQUEST(&dev->ring, i);
 
@@ -366,14 +589,37 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
     req->id = (uintptr_t) aiocbp;
     req->sector_number = aiocbp->aio_offset / 512;
 
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    for (j = 0; j < n; j++) {
+        req->seg[j].first_sect = 0;
+        req->seg[j].last_sect = PAGE_SIZE / 512 - 1;
+    }
+    req->seg[n-1].last_sect = (((uintptr_t) aiocbp->aio_nbytes - 1) & ~PAGE_MASK) / 512;
+#else
     for (j = 0; j < n; j++) {
         req->seg[j].first_sect = 0;
         req->seg[j].last_sect = PAGE_SIZE / 512 - 1;
     }
     req->seg[0].first_sect = ((uintptr_t)aiocbp->aio_buf & ~PAGE_MASK) / 512;
     req->seg[n-1].last_sect = (((uintptr_t)aiocbp->aio_buf + aiocbp->aio_nbytes - 1) & ~PAGE_MASK) / 512;
+#endif
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    for (j = 0, p = ((i) % BLK_RING_SIZE) * BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST;
+         j < n;
+         ++j, ++p) {
+        buffer = &dev->pt_pool[p];
+        ASSERT(buffer->inflight == 0);
+        aiocbp->prst_buffer[j] = buffer;
+        req->seg[j].gref = buffer->gref;
+        buffer->inflight = 1;
+        if (write) {
+            data = (uintptr_t)aiocbp->aio_buf + j * PAGE_SIZE;
+            _fmemcpy256(buffer->page, (void *) data, PAGE_SIZE);
+        }
+    }
+#else
     for (j = 0; j < n; j++) {
-	uintptr_t data = start + j * PAGE_SIZE;
+        data = start + j * PAGE_SIZE;
         if (!write) {
             /* Trigger CoW if needed */
             *(char*)(data + (req->seg[j].first_sect << 9)) = 0;
@@ -382,10 +628,18 @@ void blkfront_aio(struct blkfront_aiocb *aiocbp, int write)
 	aiocbp->gref[j] = req->seg[j].gref =
             gnttab_grant_access(dev->dom, virtual_to_mfn(data), write);
     }
+#endif
 
     dev->ring.req_prod_pvt = i + 1;
 
     wmb();
+    return 0;
+}
+
+void blkfront_aio_submit(struct blkfront_dev *dev)
+{
+    int notify;
+
     RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->ring, notify);
 
     if(notify) notify_remote_via_evtchn(dev->evtchn);
@@ -514,12 +768,45 @@ moretodo:
 
         switch (rsp->operation) {
         case BLKIF_OP_READ:
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+            {
+                size_t left    = aiocbp->aio_nbytes;
+                uintptr_t data = (uintptr_t)aiocbp->aio_buf;
+                struct blk_buffer *buffer;
+                int j = 0;
+
+                while (left > PAGE_SIZE) {
+                    buffer = aiocbp->prst_buffer[j];
+                    ASSERT(buffer->inflight == 1);
+                    _fmemcpy256((void *) data, buffer->page, PAGE_SIZE);
+                    buffer->inflight = 0;
+                    data += PAGE_SIZE;
+                    left -= PAGE_SIZE;
+                    ++j;
+                }
+                if (left) {
+                    buffer = aiocbp->prst_buffer[j];
+                    ASSERT(buffer->inflight == 1);
+                    _fmemcpy256((void *) data, buffer->page, left);
+                    buffer->inflight = 0;
+                    ++j;
+                }
+                ASSERT(j == aiocbp->n);
+            }
+            break;
+#endif
         case BLKIF_OP_WRITE:
         {
             int j;
 
             for (j = 0; j < aiocbp->n; j++)
+            {
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+                aiocbp->prst_buffer[j]->inflight = 0;
+#else
                 gnttab_end_access(aiocbp->gref[j]);
+#endif
+            }
 
             break;
         }

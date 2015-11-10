@@ -115,6 +115,7 @@ CONFIG_SPARSE_BSS		?= y
 CONFIG_QEMU_XS_ARGS		?= n
 CONFIG_PCIFRONT			?= n
 CONFIG_BLKFRONT			?= y
+CONFIG_BLKFRONT_PERSISTENT_GRANTS	?= n
 CONFIG_TPMFRONT			?= n
 CONFIG_TPM_TIS			?= n
 CONFIG_TPMBACK			?= n
@@ -123,6 +124,7 @@ CONFIG_NETMAP_API		?= 10
 CONFIG_NETFRONT			?= y
 CONFIG_NETFRONT_POLL		?= n
 CONFIG_NETFRONT_POLLTIMEOUT	?= 10000 # usecs
+CONFIG_SELECT_POLL		?= n
 CONFIG_FBFRONT			?= n
 CONFIG_KBDFRONT			?= n
 CONFIG_CONSFRONT		?= n
@@ -134,8 +136,10 @@ CONFIG_LWIP_NOTHREADS			?= n
 CONFIG_LWIP_HEAP_ONLY			?= n
 CONFIG_LWIP_POOLS_ONLY			?= n
 CONFIG_LWIP_MINIMAL			?= y
+CONFIG_LWIP_WND_SCALE			?= n
 CONFIG_LWIP_CHECKSUM_NOGEN		?= n
 CONFIG_LWIP_CHECKSUM_NOCHECK		?= n
+CONFIG_LWIP_SELECT_TIMEOUT	?= 1
 CONFIG_SHUTDOWN			?= y
 CONFIG_PVH				?= y
 
@@ -183,6 +187,7 @@ MINIOS_OPT_FLAGS-$(CONFIG_PCIFRONT)			+= -DCONFIG_PCIFRONT
 MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT)			+= -DCONFIG_NETFRONT
 MINIOS_OPT_FLAGS-$(CONFIG_NETMAP)			+= -DCONFIG_NETMAP
 MINIOS_OPT_FLAGS-$(CONFIG_BLKFRONT)			+= -DCONFIG_BLKFRONT
+MINIOS_OPT_FLAGS-$(CONFIG_BLKFRONT_PERSISTENT_GRANTS)	+= -DCONFIG_BLKFRONT_PERSISTENT_GRANTS
 MINIOS_OPT_FLAGS-$(CONFIG_TPMFRONT)			+= -DCONFIG_TPMFRONT
 MINIOS_OPT_FLAGS-$(CONFIG_TPM_TIS)			+= -DCONFIG_TPM_TIS
 MINIOS_OPT_FLAGS-$(CONFIG_TPMBACK)			+= -DCONFIG_TPMBACK
@@ -192,6 +197,7 @@ MINIOS_OPT_FLAGS-$(CONFIG_CONSFRONT)		+= -DCONFIG_CONSFRONT
 MINIOS_OPT_FLAGS-$(CONFIG_CONSFRONT_SYNC)	+= -DCONFIG_CONSFRONT_SYNC
 MINIOS_OPT_FLAGS-$(CONFIG_XENBUS)			+= -DCONFIG_XENBUS
 MINIOS_OPT_FLAGS-$(CONFIG_PVH)				+= -DCONFIG_PVH
+MINIOS_OPT_FLAGS-$(CONFIG_SELECT_POLL)		+= -DCONFIG_SELECT_POLL
 MINIOS_OPT_FLAGS-$(CONFIG_DEBUG_MM)			+= -DMM_DEBUG
 MINIOS_OPT_FLAGS-$(CONFIG_DEBUG_DFS)		+= -DFS_DEBUG
 MINIOS_OPT_FLAGS-$(CONFIG_DEBUG_LIBC)		+= -DLIBC_DEBUG
@@ -379,8 +385,10 @@ LWIP_OPT_FLAGS-$(CONFIG_LWIP_NOTHREADS)		+= -DCONFIG_LWIP_NOTHREADS
 LWIP_OPT_FLAGS-$(CONFIG_LWIP_HEAP_ONLY)		+= -DCONFIG_LWIP_HEAP_ONLY
 LWIP_OPT_FLAGS-$(CONFIG_LWIP_POOLS_ONLY)	+= -DCONFIG_LWIP_POOLS_ONLY
 LWIP_OPT_FLAGS-$(CONFIG_LWIP_MINIMAL)		+= -DCONFIG_LWIP_MINIMAL
+LWIP_OPT_FLAGS-$(CONFIG_LWIP_WND_SCALE)	+= -DCONFIG_LWIP_WND_SCALE
 LWIP_OPT_FLAGS-$(CONFIG_LWIP_CHECKSUM_NOGEN)	+= -DCONFIG_LWIP_CHECKSUM_NOGEN
 LWIP_OPT_FLAGS-$(CONFIG_LWIP_CHECKSUM_NOCHECK)	+= -DCONFIG_LWIP_CHECKSUM_NOCHECK
+LWIP_OPT_FLAGS-$(CONFIG_LWIP)	+= -DCONFIG_LWIP_SELECT_TIMEOUT=$(CONFIG_LWIP_SELECT_TIMEOUT)
 
 CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip
 CINCLUDES			+= -isystem $(LWIP_ROOT)/include/lwip/ipv4
@@ -474,8 +482,8 @@ endif
 
 # Configure debuging
 ifeq ($(debug),y)
-CFLAGS			+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls
-CXXFLAGS		+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls
+CFLAGS			+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls -DDEBUG_BUILD
+CXXFLAGS		+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls -DDEBUG_BUILD
 else
 CFLAGS			+= -O3 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
 CXXFLAGS		+= -O3 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
@@ -570,6 +578,43 @@ distclean-stub:
 banner:
 	@#
 
+################################################################################
+# Tags
+################################################################################
+all_sources_lists = minios.srclist own.srclist xen.srclist newlib.srclist
+minios.srclist: ROOT_SRC = $(MINIOS_ROOT)
+xen.srclist: ROOT_SRC = $(XEN_ROOT)
+newlib.srclist: ROOT_SRC = $(NEWLIB_ROOT)
+own.srclist: ROOT_SRC = .
+%.srclist:
+	-$(call verbose_cmd, \
+		find -L $(ROOT_SRC) \
+		\( -iname '*.c' -o -iname '*.cpp' -o -iname '*.h' -o -iname '*.hpp' \) \
+		-exec readlink -f '{}' \; > $@, \
+		'LST $(ROOT_SRC)')
+
+src.list: $(all_sources_lists)
+	$(call verbose_cmd, \
+		cat $(all_sources_lists) | sort -u > $@, \
+		'GEN $@')
+
+.PHONY: cscope
+cscope: src.list
+	$(call verbose_cmd, \
+		cscope -c -b -k -i src.list -f cscope.out, \
+		"GEN scope.out")
+
+.PHONY: TAGS
+TAGS: src.list
+	$(call verbose_cmd, \
+		rm -f TAGS; xargs -a src.list etags -a, \
+		'GEN TAGS')
+
+.PHONY: clean-tags
+clean-tags:
+	$(call verbose_cmd, $(RM) \
+		src.list $(all_sources_lists) cscope.out TAGS, \
+		'CLN tags')
 
 ################################################################################
 # Others
@@ -591,5 +636,5 @@ $(BUILD_DIRS):
 
 .PHONY: clean
 clean: clean-minios clean-lwip clean-stub
-distclean: distclean-minios distclean-lwip distclean-stub
+distclean: distclean-minios distclean-lwip distclean-stub clean-tags
 	$(call verbose_cmd,$(RMDIR),'CLN',$(STUBDOM_BUILD_DIR))
