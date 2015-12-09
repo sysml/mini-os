@@ -6,6 +6,7 @@
  * Does not handle fragments or extras for transmit.
  */
 #include <mini-os/os.h>
+#include <mini-os/mm.h>
 #include <mini-os/xenbus.h>
 #include <mini-os/events.h>
 #include <errno.h>
@@ -701,27 +702,27 @@ out:
 }
 
 #ifdef HAVE_LWIP
-#define netfront_count_pbuf_slots(dev, len) \
-	DIV_ROUND_UP((len), PAGE_SIZE);
+#define netfront_count_pbuf_slots(dev, p) \
+  DIV_ROUND_UP(((int)(p)->tot_len), PAGE_SIZE);
 
-static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
-							    struct netif_tx_request *tx,
-							    struct pbuf *p, int *slots)
+static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront_dev *dev,
+								 struct netif_tx_request *tx,
+								 struct pbuf *p, int *slots)
 {
-	void *page = dev->tx_buffers[tx->id].page;
-	unsigned page_off, page_left;
-	unsigned p_off, p_left;
-	unsigned len;
+	void *page;
+	unsigned long page_off, page_left;
+	unsigned long p_off, p_left;
+	unsigned long len;
 
-	(*slots)  = 0;
 	p_off     = 0;
 	p_left    = p->len;
-	page_off  = tx->size;
+	page      = dev->tx_buffers[tx->id].page;
+	page_off  = tx->offset;
 	page_left = (PAGE_SIZE) - page_off;
 	for (;;) {
 		len = min(page_left, p_left);
 
-		dprintk("tx: make_txreqs: slot %3u, id %3u: page@%12p, page_off: %4u page_left: %4u <-%-4u bytes-- p@%12p, p_off: %4u, p_left: %4u\n",
+		dprintk("tx: make_txreqs: slot %3u, id %3u: page@%12p, page_off: %4lu page_left: %4lu <-%4lu bytes-- p@%12p, p_off: %4lu, p_left: %4lu\n",
 			*slots, tx->id, page, page_off, page_left, len, p->payload, p_off, p_left);
 		NETIF_MEMCPY((void *)(((uintptr_t) page) + page_off),
 			     (void *)(((uintptr_t) p->payload) + p_off),
@@ -732,54 +733,63 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 		page_off  += len;
 		page_left -= len;
 
-		if (!p_left) {
+		if (p_left == 0) {
 			if (!p->next)
 				break; /* we are done processing this pbuf chain */
 			p = p->next;
 			p_off  = 0;
 			p_left = p->len;
 		}
-		if (!page_left) {
+		if (page_left == 0) {
 			tx->flags |= NETTXF_more_data;
+			dprintk("[%3u] tx->gref   = %p\n", tx->id, tx->gref);
+			dprintk("      tx->flags  = %"PRIu16"\n", tx->flags);
+			dprintk("      tx->offset = %"PRIu16"\n", tx->offset);
+			dprintk("      tx->size   = %"PRIu16"\n", tx->size);
 			tx = netfront_get_page(dev); /* next page */
 			ASSERT(tx != NULL); /* out of memory
 					       -> this should have been catched before calling this function */
-			page = dev->tx_buffers[tx->id].page;
-			page_off = 0;
+			page      = dev->tx_buffers[tx->id].page;
+			page_off  = tx->offset = 0;
 			page_left = PAGE_SIZE;
+			tx->size  = 0;
 			(*slots)++;
 		}
 	}
+	dprintk("[%3u] tx->gref   = %p\n", tx->id, tx->gref);
+	dprintk("      tx->flags  = %"PRIu16"\n", tx->flags);
+	dprintk("      tx->offset = %"PRIu16"\n", tx->offset);
+	dprintk("      tx->size   = %"PRIu16"\n", tx->size);
 	return tx;
 }
 
 /**
  * Transmit function for pbufs which can handle checksum and segmentation offloading for TCPv4 and TCPv6
  */
-err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int tso, int push)
+err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, int push)
 {
 	struct netif_tx_request *first_tx, *tx;
-	struct netif_extra_info *extra_info;
+	struct netif_extra_info *gso;
 	int slots;
 	int used = 0;
 	int flags;
 	struct pbuf *q;
 	void *page;
 #ifdef CONFIG_NETFRONT_GSO
-	int gso;
+	int sego;
 #endif /* CONFIG_NETFRONT_GSO */
 
 	/* Counts how many slots we require for this buf */
-	slots = netfront_count_pbuf_slots(dev, p->tot_len);
+	slots = netfront_count_pbuf_slots(dev, p);
 #ifdef CONFIG_NETFRONT_GSO
-	gso = (p->tot_len > TCP_MSS) ? 1 : 0;
-	/* GSO requires TCP offloading set */
-	BUG_ON(gso && !(tso & (XEN_NETIF_GSO_TYPE_TCPV4 | XEN_NETIF_GSO_TYPE_TCPV6)));
+	sego = (p->flags & PBUF_FLAG_GSO) ? 1 : 0;
+	/* GSO requires checksum offloading set */
+	BUG_ON(sego && !(co_type & (XEN_NETIF_GSO_TYPE_TCPV4 | XEN_NETIF_GSO_TYPE_TCPV6)));
 #endif /* CONFIG_NETFRONT_GSO */
 
 	/* Checks if there are enough requests for this many slots (gso requires one slot more) */
 #ifdef CONFIG_NETFRONT_GSO
-	if (unlikely(!netfront_tx_available(dev, slots + gso))) {
+	if (unlikely(!netfront_tx_available(dev, slots + sego))) {
 #else
 	if (unlikely(!netfront_tx_available(dev, slots))) {
 #endif /* CONFIG_NETFRONT_GSO */
@@ -791,34 +801,44 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int tso, int 
 	first_tx = netfront_get_page(dev);
 	ASSERT(first_tx != NULL);
 #ifdef CONFIG_NETFRONT_GSO
-	if (gso) {
+	if (sego) {
+		gso = RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
+
 		first_tx->flags |= NETTXF_extra_info;
-		extra_info = RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
-		extra_info->type = XEN_NETIF_EXTRA_TYPE_GSO;
-		extra_info->flags = 0;
-		extra_info->u.gso.size = TCP_MSS;
-		extra_info->u.gso.type = tso; /* XEN_NETIF_GSO_TYPE_TCPV4, XEN_NETIF_GSO_TYPE_TCPV6 */
-		extra_info->u.gso.pad = 0;
-		extra_info->u.gso.features = 0;
+		gso->u.gso.size = p->gso_size; /* segmentation size */
+		gso->u.gso.type = co_type; /* XEN_NETIF_GSO_TYPE_TCPV4, XEN_NETIF_GSO_TYPE_TCPV6 */
+		gso->u.gso.pad = 0;
+		gso->u.gso.features = 0;
+
+		gso->type = XEN_NETIF_EXTRA_TYPE_GSO;
+		gso->flags = 0;
 
 		used++;
 	}
-	/* partially checksummed (offload enabled), or checksummed */
-	first_tx->flags |= tso ? ((NETTXF_csum_blank) | (NETTXF_data_validated)) : (NETTXF_data_validated);
-#else
-	first_tx->flags |= (NETTXF_data_validated);
 #endif /* CONFIG_NETFRONT_GSO */
+	/* partially checksummed (offload enabled), or checksummed */
+	first_tx->flags |= co_type ? ((NETTXF_csum_blank) | (NETTXF_data_validated)) : (NETTXF_data_validated);
+	first_tx->offset = 0;
 
 	/* Make TX requests for the pbuf */
-	tx = netfront_make_txreqs(dev, first_tx, p, &used);
+	tx = netfront_make_txreqs_pgnt(dev, first_tx, p, &used);
 	ASSERT(slots >= used);       /* we should have taken at most the number slots we required */
-	first_tx->size = p->tot_len; /* first request contains total size of packet */
+
+	/*
+	 * The first fragment has the entire packet
+	 * size, subsequent fragments have just the
+	 * fragment size. The backend works out the
+	 * true size of the first fragment by
+	 * subtracting the sizes of the other
+	 * fragments.
+	 */
+	first_tx->size = (typeof(first_tx->size)) p->tot_len; /* first request contains total size of packet */
 
 	push |= (((dev)->tx.req_prod_pvt - (dev)->tx.rsp_cons) <= NET_TX_RING_SIZE / 2);
 	if (push)
 		netfront_xmit_push(dev);
 
-	dprintk("tx: %c%c%c %u bytes (%u slots)\n", gso ? 'S' : '-', tso ? 'C' : '-', push ? 'P' : '-', p->tot_len, slots);
+	dprintk("tx: %c%c%c %u bytes (%u slots)\n", sego ? 'S' : '-', co_type ? 'C' : '-', push ? 'P' : '-', p->tot_len, slots);
 
 	return ERR_OK;
 }
@@ -1029,28 +1049,33 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 	printk("************************ NETFRONT for %s **********\n\n\n",
 	       dev->nodename);
 
-	printk("net TX ring size %d\n", NET_TX_RING_SIZE);
-	printk("net RX ring size %d\n", NET_RX_RING_SIZE);
 	init_SEMAPHORE(&dev->tx_sem, NET_TX_RING_SIZE);
 	for(i=0;i<NET_TX_RING_SIZE;i++)
 	{
 		add_id_to_freelist(i,dev->tx_freelist);
 		dev->tx_buffers[i].page = (char*)alloc_page();
+		BUG_ON(dev->tx_buffers[i].page == NULL);
 		dev->tx_buffers[i].gref = gnttab_grant_access(dev->dom,
 							      virt_to_mfn(dev->tx_buffers[i].page), 1);
+		dprintk("tx[%d]: page = %p, gref=0x%x\n", i, dev->tx_buffers[i].page, dev->tx_buffers[i].gref);
 	}
+	printk("net TX ring size %d, %lu KB\n", NET_TX_RING_SIZE, (unsigned long)(NET_TX_RING_SIZE * PAGE_SIZE)/1024);
 
 	for(i=0;i<NET_RX_RING_SIZE;i++)
 	{
 	/* TODO: that's a lot of memory */
 		dev->rx_buffers[i].page = (char*)alloc_page();
+		BUG_ON(dev->rx_buffers[i].page == NULL);
+		dprintk("rx[%d]: page = %p\n", i, dev->rx_buffers[i].page);
 	}
+	printk("net RX ring size %d, %lu KB\n", NET_RX_RING_SIZE, (unsigned long)(NET_RX_RING_SIZE * PAGE_SIZE)/1024);
 
 	if (feature_split_evtchn) {
 		evtchn_alloc_unbound(dev->dom, netfront_tx_handler, dev,
 				     &dev->tx_evtchn);
 		evtchn_alloc_unbound(dev->dom, netfront_rx_handler, dev,
 				     &dev->rx_evtchn);
+		printk("split event channels enabled\n");
 	} else {
 #ifdef HAVE_LIBC
 		if (dev->netif_rx == NETIF_SELECT_RX)
