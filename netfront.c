@@ -707,18 +707,24 @@ out:
 
 static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront_dev *dev,
 								 struct netif_tx_request *tx,
-								 struct pbuf *p, int *slots)
+								 const struct pbuf *p, int *slots)
 {
+	struct netif_tx_request *first_tx = tx;
+	const struct pbuf *first_p = p;
+	register unsigned long page_off, page_left;
+	register unsigned long p_off, p_left;
+	register unsigned long len;
+	register unsigned long tot_len;
 	void *page;
-	unsigned long page_off, page_left;
-	unsigned long p_off, p_left;
-	unsigned long len;
 
+	tot_len   = 0;
 	p_off     = 0;
 	p_left    = p->len;
 	page      = dev->tx_buffers[tx->id].page;
-	page_off  = tx->offset;
+	page_off  = tx->offset = 0;
 	page_left = (PAGE_SIZE) - page_off;
+	tx->size  = 0;
+
 	for (;;) {
 		len = min(page_left, p_left);
 
@@ -732,6 +738,7 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
 		tx->size  += len;
 		page_off  += len;
 		page_left -= len;
+		tot_len   += len;
 
 		if (p_left == 0) {
 			if (!p->next)
@@ -742,13 +749,9 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
 		}
 		if (page_left == 0) {
 			tx->flags |= NETTXF_more_data;
-			dprintk("[%3u] tx->gref   = %p\n", tx->id, tx->gref);
-			dprintk("      tx->flags  = %"PRIu16"\n", tx->flags);
-			dprintk("      tx->offset = %"PRIu16"\n", tx->offset);
-			dprintk("      tx->size   = %"PRIu16"\n", tx->size);
 			tx = netfront_get_page(dev); /* next page */
-			ASSERT(tx != NULL); /* out of memory
-					       -> this should have been catched before calling this function */
+			BUG_ON(tx == NULL); /* out of memory -> this should have been catched
+					       before calling this function */
 			page      = dev->tx_buffers[tx->id].page;
 			page_off  = tx->offset = 0;
 			page_left = PAGE_SIZE;
@@ -756,10 +759,17 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
 			(*slots)++;
 		}
 	}
-	dprintk("[%3u] tx->gref   = %p\n", tx->id, tx->gref);
-	dprintk("      tx->flags  = %"PRIu16"\n", tx->flags);
-	dprintk("      tx->offset = %"PRIu16"\n", tx->offset);
-	dprintk("      tx->size   = %"PRIu16"\n", tx->size);
+
+	/*
+	 * The first fragment has the entire packet
+	 * size, subsequent fragments have just the
+	 * fragment size. The backend works out the
+	 * true size of the first fragment by
+	 * subtracting the sizes of the other
+	 * fragments.
+	 */
+	first_tx->size = tot_len;
+	BUG_ON(first_p->tot_len != tot_len); /* broken pbuf?! */
 	return tx;
 }
 
@@ -768,13 +778,10 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
  */
 err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, int push)
 {
-	struct netif_tx_request *first_tx, *tx;
+	struct netif_tx_request *first_tx;
 	struct netif_extra_info *gso;
 	int slots;
 	int used = 0;
-	int flags;
-	struct pbuf *q;
-	void *page;
 #ifdef CONFIG_NETFRONT_GSO
 	int sego;
 #endif /* CONFIG_NETFRONT_GSO */
@@ -802,7 +809,7 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 	ASSERT(first_tx != NULL);
 #ifdef CONFIG_NETFRONT_GSO
 	if (sego) {
-		gso = RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
+		gso = (struct netif_extra_info *) RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
 
 		first_tx->flags |= NETTXF_extra_info;
 		gso->u.gso.size = p->gso_size; /* segmentation size */
@@ -816,30 +823,19 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 		used++;
 	}
 #endif /* CONFIG_NETFRONT_GSO */
-	/* partially checksummed (offload enabled), or checksummed */
-	first_tx->flags |= co_type ? ((NETTXF_csum_blank) | (NETTXF_data_validated)) : (NETTXF_data_validated);
-	first_tx->offset = 0;
 
 	/* Make TX requests for the pbuf */
-	tx = netfront_make_txreqs_pgnt(dev, first_tx, p, &used);
-	ASSERT(slots >= used);       /* we should have taken at most the number slots we required */
+	netfront_make_txreqs_pgnt(dev, first_tx, p, &used);
+	ASSERT(slots >= used); /* we should have taken at most the number slots that we estimated before */
 
-	/*
-	 * The first fragment has the entire packet
-	 * size, subsequent fragments have just the
-	 * fragment size. The backend works out the
-	 * true size of the first fragment by
-	 * subtracting the sizes of the other
-	 * fragments.
-	 */
-	first_tx->size = (typeof(first_tx->size)) p->tot_len; /* first request contains total size of packet */
+	/* partially checksummed (offload enabled), or checksummed */
+	first_tx->flags |= co_type ? ((NETTXF_csum_blank) | (NETTXF_data_validated)) : (NETTXF_data_validated);
 
 	push |= (((dev)->tx.req_prod_pvt - (dev)->tx.rsp_cons) <= NET_TX_RING_SIZE / 2);
 	if (push)
 		netfront_xmit_push(dev);
 
 	dprintk("tx: %c%c%c %u bytes (%u slots)\n", sego ? 'S' : '-', co_type ? 'C' : '-', push ? 'P' : '-', p->tot_len, slots);
-
 	return ERR_OK;
 }
 
