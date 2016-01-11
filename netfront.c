@@ -79,9 +79,7 @@ struct netfront_dev {
 	struct netif_rx_response rsp;
 	/* extras (if any) of the inflight buffer */
 	struct netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
-	/* inflight buffer */
-	struct pbuf *pbuf;
-	/* next available chunk */
+	/* used by pbuf_copy_bits */
 	struct pbuf *pbuf_cur;
 	uint32_t pbuf_off;
 
@@ -208,59 +206,23 @@ static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *offset,
 		}
 	}
 
-	if (q) {
-		*p = q;
-		*offset = q_ofs;
-	}
+	*p = q;
+	*offset = q_ofs;
 }
 
-/* Allocates a pbuf */
-static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev,
-					       unsigned char *data, int32_t len,
-					       int32_t realsize, int pad)
+/* Allocates a pbuf and initializes dev->pbuf_cur, dev->pbuf_off */
+static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev, int32_t len)
 {
-	struct pbuf *p;
+  struct pbuf *p;
 
-	p = pbuf_alloc(PBUF_RAW, realsize + pad, PBUF_POOL);
-	if (unlikely(!p))
-		return NULL;
+  if (unlikely((len + ETH_PAD_SIZE) > 0xFFFF || len <= 0))
+    return NULL; /* unsupported length: ignore */
 
-#if ETH_PAD_SIZE
-	pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
-#endif
+  p = pbuf_alloc(PBUF_RAW, (u16_t) (len + ETH_PAD_SIZE), PBUF_POOL);
+  dev->pbuf_cur = p;
+  dev->pbuf_off = 0;
 
-	if (likely(!p->next)) {
-		/* fast path */
-		NETIF_MEMCPY(p->payload, data, len);
-	} else {
-		dev->pbuf_cur = p;
-		dev->pbuf_off = 0;
-		pbuf_copy_bits(&dev->pbuf_cur, &dev->pbuf_off, data, len);
-	}
-
-#if ETH_PAD_SIZE
-	pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
-#endif
-	return p;
-}
-
-static inline void handle_pbuf(struct netfront_dev *dev,
-			       struct netif_rx_response *rx,
-			       struct net_buffer *buf, int32_t realsize)
-{
-	unsigned char* page = buf->page;
-	if (likely(!dev->pbuf)) { /* it's a paged pbuf */
-		dprintk("rx: handle: new: pbuf %d\n", realsize);
-		dev->pbuf = netfront_alloc_pbuf(dev, page+rx->offset, rx->status,
-						realsize, ETH_PAD_SIZE);
-
-		/* XXX TODO: Request refill */
-		BUG_ON(!dev->pbuf);
-	} else {
-		dprintk("rx: handle: copy: pbuf %d\n", rx->status);
-		pbuf_copy_bits(&dev->pbuf_cur, &dev->pbuf_off,
-			       page+rx->offset, rx->status);
-	}
+  return p;
 }
 #endif
 
@@ -286,18 +248,14 @@ static inline int handle_buffer(struct netfront_dev *dev,
 		return 1;
 	}
 #endif
-	dprintk("rx: %c%c- %u bytes\n",
-		rx->flags & NETRXF_extra_info ? 'S' : '-',
-		rx->flags & ((NETRXF_csum_blank) | (NETRXF_data_validated)) ? 'C' : '-',
-		rx->status);
-
+#ifdef HAVE_LWIP
+	if (likely(dev->netif_rx_pbuf)) {
+		pbuf_copy_bits(&dev->pbuf_cur, &dev->pbuf_off, buf->page+rx->offset, rx->status);
+		return 1;
+	}
+#endif
 	if (dev->netif_rx)
 		dev->netif_rx(page+rx->offset, rx->status, dev->netif_rx_arg);
-
-#ifdef HAVE_LWIP
-	if (dev->netif_rx_pbuf)
-		handle_pbuf(dev, rx, buf, realsize);
-#endif
 	return 1;
 }
 
@@ -374,6 +332,10 @@ static int netfront_get_responses(struct netfront_dev *dev,
 	uint16_t flags = rsp->flags;
 	RING_IDX cons = rp;
 	uint16_t slots = 1;
+	int drop = 0;
+#ifdef HAVE_LWIP
+	struct pbuf *p;
+#endif
 
 	dprintk("rx: ring: len %d %s\n", size,
 		(flags & NETRXF_more_data ? "(more true) ": ""));
@@ -392,12 +354,29 @@ static int netfront_get_responses(struct netfront_dev *dev,
 		realsize = size + netfront_get_size(dev, cons);
 	}
 
+	dprintk("rx: %c%c- %"PRIi32" bytes\n",
+		flags & NETRXF_extra_info ? 'S' : '-',
+		flags & ((NETRXF_csum_blank) | (NETRXF_data_validated)) ? 'C' : '-',
+		realsize);
+
+#ifdef HAVE_LWIP
+	if (likely(dev->netif_rx_pbuf)) {
+	  p = netfront_alloc_pbuf(dev, realsize);
+	  drop = (p == NULL);
+
+#if ETH_PAD_SIZE
+	  if (likely(!drop))
+	    pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
+#endif /* ETH_PAD_SIZE */
+	}
+#endif /* HAVE_LWIP */
+
 	for (;;) {
 		if (unlikely(rsp->status < 0 ||
 			     (rsp->offset + rsp->status > PAGE_SIZE)))
 			printk("rx: ring: rx->offset %d, size %d\n",
 				rsp->offset, size);
-		else
+		else if (likely(!drop))
 			handle_buffer(dev, rsp, &dev->rx_buffers[id], realsize);
 
 		if (!(flags & NETRXF_more_data))
@@ -414,6 +393,20 @@ static int netfront_get_responses(struct netfront_dev *dev,
 	}
 
 	dev->rx.rsp_cons = cons + slots;
+
+	if (likely(!drop)) {
+#ifdef HAVE_LWIP
+	  if (likely(dev->netif_rx_pbuf)) {
+#if ETH_PAD_SIZE
+	    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
+#endif /* ETH_PAD_SIZE */
+
+	    dev->netif_rx_pbuf(p, dev->netif_rx_arg); /* passes p=NULL when there was a drop */
+	  }
+#endif /* HAVE_LWIP */
+	} else {
+	  dprintk("  rx: dropped\n");
+	}
 	return 1;
 }
 
@@ -439,17 +432,6 @@ moretodo:
 	while (cons != rp) {
 		NETIF_MEMCPY(rsp, RING_GET_RESPONSE(&dev->rx, cons), sizeof(*rsp));
 		netfront_get_responses(dev, cons);
-
-#ifdef HAVE_LWIP
-		if (dev->pbuf) {
-			dprintk("rx: handle: netif: pbuf %u\n", dev->pbuf->tot_len);
-			dev->netif_rx_pbuf(dev->pbuf, dev->netif_rx_arg);
-			dev->pbuf = NULL;
-			dev->pbuf_cur = NULL;
-			dev->pbuf_off = 0;
-		}
-#endif
-
 		cons = dev->rx.rsp_cons;
 	}
 
@@ -861,11 +843,6 @@ void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
 	dev->netif_rx = NULL;
 	dev->netif_rx_pbuf = thenetif_rx;
 	dev->netif_rx_arg = arg;
-
-	/* Reset runtime state*/
-	dev->pbuf = NULL;
-	dev->pbuf_cur = NULL;
-	dev->pbuf_off = 0;
 }
 #endif
 
