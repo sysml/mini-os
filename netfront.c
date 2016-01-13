@@ -36,6 +36,7 @@
 #endif
 
 DECLARE_WAIT_QUEUE_HEAD(netfront_queue);
+DECLARE_WAIT_QUEUE_HEAD(netfront_txqueue);
 
 #ifdef HAVE_LIBC
 #define NETIF_SELECT_RX ((void*)-1)
@@ -482,6 +483,10 @@ void netfront_tx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
+
+#ifdef CONFIG_NETFRONT_WAITFORTX
+	wake_up(&netfront_txqueue);
+#endif
 }
 
 void netfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
@@ -635,6 +640,8 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 
 #define netfront_tx_available(dev, slots) \
   (((dev)->tx.req_prod_pvt - (dev)->tx.rsp_cons) < (NET_TX_RING_SIZE - (slots)))
+#define netfront_tx_possible(dev, slots) \
+  (0 < (NET_TX_RING_SIZE - (slots)))
 
 static inline void netfront_xmit_notify(struct netfront_dev *dev)
 {
@@ -767,6 +774,10 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 #ifdef CONFIG_NETFRONT_GSO
 	int sego;
 #endif /* CONFIG_NETFRONT_GSO */
+#ifdef CONFIG_NETFRONT_WAITFORTX
+	unsigned long flags;
+	DEFINE_WAIT(w);
+#endif /* CONFIG_NETFRONT_WAITFORTX */
 
 	/* Counts how many slots we require for this buf */
 	slots = netfront_count_pbuf_slots(dev, p);
@@ -778,13 +789,35 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 
 	/* Checks if there are enough requests for this many slots (gso requires one slot more) */
 #ifdef CONFIG_NETFRONT_GSO
+	BUG_ON(!netfront_tx_possible(dev, slots + sego));
+#else
+	BUG_ON(!netfront_tx_possible(dev, slots));
+#endif /* CONFIG_NETFRONT_GSO */
+
+#ifdef CONFIG_NETFRONT_WAITFORTX
+	local_irq_save(flags);
+ try_again:
+#endif /* CONFIG_NETFRONT_WAITFORTX */
+#ifdef CONFIG_NETFRONT_GSO
 	if (unlikely(!netfront_tx_available(dev, slots + sego))) {
 #else
 	if (unlikely(!netfront_tx_available(dev, slots))) {
 #endif /* CONFIG_NETFRONT_GSO */
 		netfront_xmit_push(dev);
+#ifdef CONFIG_NETFRONT_WAITFORTX
+		add_waiter(w, netfront_txqueue); /* release thread until space is free'd */
+		local_irq_restore(flags);
+		schedule();
+		local_irq_save(flags);
+		remove_waiter(w, netfront_txqueue); /* release thread until space is free'd */
+		goto try_again;
+#else
 		return ERR_MEM;
+#endif /* CONFIG_NETFRONT_WAITFORTX */
 	}
+#ifdef CONFIG_NETFRONT_WAITFORTX
+	local_irq_restore(flags);
+#endif /* CONFIG_NETFRONT_WAITFORTX */
 
 	/* Set extras if packet is GSO kind */
 	first_tx = netfront_get_page(dev);
