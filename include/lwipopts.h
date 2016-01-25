@@ -103,23 +103,6 @@ void lwip_free(void *ptr);
 #define LWIP_COMPAT_SOCKETS 0
 
 /*
- * Pool options
- */
-/* PBUF pools */
-#if !defined CONFIG_LWIP_PBUF_NUM_RX || !CONFIG_LWIP_PBUF_NUM_RX
-#undef CONFIG_LWIP_PBUF_NUM_RX
-#define CONFIG_LWIP_PBUF_NUM_RX 512
-#endif /* !defined CONFIG_LWIP_PBUF_NUM_RX || !CONFIG_LWIP_PBUF_NUM_RX */
-
-#if !defined CONFIG_LWIP_PBUF_NUM_REF || !CONFIG_LWIP_PBUF_NUM_REF
-#undef CONFIG_LWIP_PBUF_NUM_REF
-#define CONFIG_LWIP_PBUF_NUM_REF (MEMP_NUM_TCP_PCB * 24)
-#endif /* !defined CONFIG_LWIP_PBUF_NUM_REF || !CONFIG_LWIP_PBUF_NUM_REF */
-
-#define PBUF_POOL_SIZE CONFIG_LWIP_PBUF_NUM_RX
-#define MEMP_NUM_PBUF CONFIG_LWIP_PBUF_NUM_REF
-
-/*
  * Thread options
  */
 #ifndef CONFIG_LWIP_NOTHREADS
@@ -142,9 +125,9 @@ void lwip_free(void *ptr);
 /*
  * TCP options
  */
-#if !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON
+#if !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON || (CONFIG_LWIP_NUM_TCPCON < 128)
 #undef CONFIG_LWIP_NUM_TCPCON
-#define CONFIG_LWIP_NUM_TCPCON 512
+#define CONFIG_LWIP_NUM_TCPCON 128
 #endif /* !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON */
 
 #define TCP_CALCULATE_EFF_SEND_MSS 1
@@ -167,15 +150,16 @@ void lwip_free(void *ptr);
 #if defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1
 #define TCP_RCV_SCALE CONFIG_LWIP_WND_SCALE_FACTOR /* scaling factor 0..14 */
 #else
-#define TCP_RCV_SCALE 3
+#define TCP_RCV_SCALE 4
 #endif /* defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1 */
 #define TCP_WND 262142
-#define TCP_SND_BUF ((TCP_WND << TCP_RCV_SCALE) * 2)
+#define TCP_SND_BUF ( 1024 * 1024 )
 
 #ifdef CONFIG_NETFRONT_GSO
 #define TCP_GSO 1
 #define TCP_GSO_MAX_SEGS 15
 #define TCP_GSO_SEG_LEN 65535
+
 /*
  * Allow a pbuf to hold up as much as possible in a single pbuf to avoid
  * long chains.
@@ -193,12 +177,12 @@ void lwip_free(void *ptr);
  * Options when no window scaling  is enabled
  */
 #define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
-#define TCP_SND_BUF (TCP_WND * 2)
+#define TCP_SND_BUF (TCP_WND + (2 * TCP_MSS))
 #endif /* LWIP_WND_SCALE */
 
-#define TCP_SND_QUEUELEN (4 * TCP_SND_BUF / TCP_MSS)
-#define TCP_QUEUE_OOSEQ 1
-#define MEMP_NUM_TCP_SEG TCP_SND_QUEUELEN
+#define TCP_SND_QUEUELEN (2 * (TCP_SND_BUF) / (TCP_MSS))
+#define TCP_QUEUE_OOSEQ 4
+#define MEMP_NUM_TCP_SEG (MEMP_NUM_TCP_PCB * ((TCP_SND_QUEUELEN) / 5))
 #define MEMP_NUM_FRAG_PBUF 32
 #define LWIP_TCP_TIMESTAMPS 0
 #define LWIP_TCP_KEEPALIVE 1
@@ -213,7 +197,13 @@ void lwip_free(void *ptr);
 #define DNS_TABLE_SIZE 32
 #define DNS_LOCAL_HOST_LIST 1
 #define DNS_LOCAL_HOSTLIST_IS_DYNAMIC 1
-//#define DNS_LOCAL_HOSTLIST_INIT {{"host1", 0x123}, {"host2", 0x234}}
+
+/*
+ * Pool options
+ */
+/* PBUF pools */
+#define PBUF_POOL_SIZE ((TCP_WND + TCP_MSS - 1) / TCP_MSS)
+#define MEMP_NUM_PBUF ((MEMP_NUM_TCP_PCB * (TCP_SND_QUEUELEN)) / 2)
 
 /*
  * Checksum options
