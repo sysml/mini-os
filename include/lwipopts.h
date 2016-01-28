@@ -9,6 +9,8 @@
 #ifndef __LWIP_LWIPOPTS_H__
 #define __LWIP_LWIPOPTS_H__
 
+#include <inttypes.h>
+
 /*
  * General options/System settings
  */
@@ -165,8 +167,14 @@ void lwip_free(void *ptr);
 
 #ifdef CONFIG_NETFRONT_GSO
 #define TCP_GSO 1
-#define TCP_GSO_MAX_SEGS 15
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 #define TCP_GSO_SEG_LEN 65535
+#else
+#include <xen/io/netif.h>
+#define TCP_SEG_LIMIT_PBUF_CLEN 1
+#define TCP_SEG_MAX_PBUF_CLEN (XEN_NETIF_NR_SLOTS_MIN / 2)
+#define TCP_GSO_SEG_LEN (TCP_SEG_MAX_PBUF_CLEN * PAGE_SIZE)
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 
 /*
  * Allow a pbuf to hold up as much as possible in a single pbuf to avoid

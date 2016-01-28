@@ -62,6 +62,9 @@ DECLARE_WAIT_QUEUE_HEAD(netfront_txqueue);
 struct net_buffer {
 	void* page;
 	grant_ref_t gref;
+#ifdef HAVE_LWIP
+	struct pbuf *pbuf;
+#endif
 };
 
 struct netfront_dev {
@@ -477,12 +480,14 @@ void netfront_rx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 
 void netfront_tx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
+#if !(defined HAVE_LWIP) || (defined CONFIG_NETFRONT_PERSISTENT_GRANTS)
 	int flags;
 	struct netfront_dev *dev = data;
 
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
+#endif
 
 #ifdef CONFIG_NETFRONT_WAITFORTX
 	wake_up(&netfront_txqueue);
@@ -498,13 +503,15 @@ void netfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 #ifdef HAVE_LIBC
 void netfront_select_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
-	int flags;
 	struct netfront_dev *dev = data;
 	int fd = dev->fd;
+#if !(defined HAVE_LWIP) || (defined CONFIG_NETFRONT_PERSISTENT_GRANTS)
+	int flags;
 
 	local_irq_save(flags);
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
+#endif
 
 	if (fd != -1)
 		files[fd].read = 1;
@@ -572,6 +579,9 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 {
 	RING_IDX cons, prod;
 	unsigned short id;
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	struct net_buffer *buf;
+#endif
 
 	do {
 		prod = dev->tx.sring->rsp_prod;
@@ -584,12 +594,22 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 			if (txrsp->status == NETIF_RSP_NULL)
 				continue;
 
-			if (txrsp->status == NETIF_RSP_ERROR)
-				printk("tx: error");
+			if (txrsp->status != NETIF_RSP_OKAY)
+				printk("netif error %d for tx\n", txrsp->status);
 
 			id  = txrsp->id;
 			BUG_ON(id >= NET_TX_RING_SIZE);
 
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+			buf = &dev->tx_buffers[id];
+			gnttab_end_access(buf->gref);
+#ifdef HAVE_LWIP
+			if (buf->pbuf) {
+				pbuf_free(buf->pbuf);
+				buf->pbuf = NULL;
+			}
+#endif /* HAVE_LWIP */
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 			add_id_to_freelist(id, dev->tx_freelist);
 			up(&dev->tx_sem);
 		}
@@ -630,11 +650,18 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 	local_irq_restore(flags);
 
 	tx = RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
-	tx->gref = buf->gref;
 	tx->offset = 0;
 	tx->size = 0;
 	tx->id = id;
 	tx->flags = 0;
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	tx->gref = buf->gref;
+#else
+	tx->gref = buf->gref = 0;
+#endif
+#ifdef HAVE_LWIP
+	buf->pbuf = NULL;
+#endif
 	return tx;
 }
 
@@ -660,6 +687,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 {
 	int flags;
 	struct netif_tx_request *tx;
+	struct net_buffer* buf;
 	void* page;
 
 #ifdef CONFIG_NETMAP
@@ -676,7 +704,12 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 
 	tx = netfront_get_page(dev);
 	ASSERT(tx != NULL);
-	page = dev->tx_buffers[tx->id].page;
+	buf = &dev->tx_buffers[tx->id];
+	page = buf->page;
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	tx->gref = buf->gref = gnttab_grant_access(dev->dom,
+						   virt_to_mfn(page), 1);
+#endif
 	NETIF_MEMCPY(page, data, len);
 	tx->flags |= (NETTXF_data_validated);
 	tx->size = len;
@@ -691,6 +724,7 @@ out:
 }
 
 #ifdef HAVE_LWIP
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 #define netfront_count_pbuf_slots(dev, p) \
   DIV_ROUND_UP(((int)(p)->tot_len), PAGE_SIZE);
 
@@ -717,7 +751,7 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
 	for (;;) {
 		len = min(page_left, p_left);
 
-		dprintk("tx: make_txreqs: slot %3u, id %3u: page@%12p, page_off: %4lu page_left: %4lu <-%4lu bytes-- p@%12p, p_off: %4lu, p_left: %4lu\n",
+		dprintk("tx: make_txreqs_pgnt: slot %3u, id %3u: page@%12p, page_off: %4lu page_left: %4lu <-%4lu bytes-- p@%12p, p_off: %4lu, p_left: %4lu\n",
 			*slots, tx->id, page, page_off, page_left, len, p->payload, p_off, p_left);
 		NETIF_MEMCPY((void *)(((uintptr_t) page) + page_off),
 			     (void *)(((uintptr_t) p->payload) + p_off),
@@ -761,6 +795,88 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
 	BUG_ON(first_p->tot_len != tot_len); /* broken pbuf?! */
 	return tx;
 }
+#else /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
+#define _count_pages(ptr, len)						\
+  ((len == 0) ? 0 : (1 +						\
+		     (((((uintptr_t)(ptr)) + (len)) >> (PAGE_SHIFT)) -	\
+		      (((uintptr_t)(ptr)) >> (PAGE_SHIFT)))))
+
+static inline unsigned long netfront_count_pbuf_slots(struct netfront_dev *dev, const struct pbuf *p)
+{
+	const struct pbuf *q;
+	unsigned long slots = 0;
+
+	for (q = p; q != NULL; q = q->next)
+	  slots += (unsigned long) _count_pages(q->payload, q->len);
+	return slots;
+}
+
+static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev *dev,
+							    struct netif_tx_request *tx,
+							    struct pbuf *p, int *slots)
+{
+	struct netif_tx_request *first_tx = tx;
+	struct net_buffer *buf;
+	struct pbuf *first_p = p;
+	struct pbuf *q;
+	unsigned long tot_len;
+	unsigned long s;
+	void *page;
+	int q_slots;
+
+	tot_len = 0;
+	buf = &dev->tx_buffers[tx->id];
+
+	/* map pages of pbuf */
+	for (q = p; q != NULL; q = q->next) {
+		q_slots = (int) _count_pages(q->payload, q->len);
+
+		/* grant pages of pbuf */
+		for (s = 0; s < q_slots; ++s) {
+			/* read only mapping */
+			page = (void *)((((unsigned long) q->payload) & PAGE_MASK) + (s * PAGE_SIZE));
+			tx->gref = buf->gref = gnttab_grant_access(dev->dom, virtual_to_mfn(page), 0);
+			BUG_ON(tx->gref == 0);
+
+			if (s == 0) /* first slot */
+				tx->offset = ((unsigned long) q->payload) & ~PAGE_MASK;
+			else
+				tx->offset = 0;
+
+			if ((s + 1) == q_slots) /* last slot */
+				tx->size   = ((((unsigned long) q->payload) + q->len) & ~PAGE_MASK) - tx->offset;
+			else
+				tx->size   = PAGE_SIZE - tx->offset;
+
+			tot_len += tx->size;
+
+			if ((s + 1) < q_slots || q->next != NULL) {
+				/* there will be a follow-up slot */
+				tx->flags |= NETTXF_more_data;
+				tx = netfront_get_page(dev); /* next slot */
+				BUG_ON(tx == NULL); /* out of memory -> this should have been catched
+						       before calling this function */
+				(*slots)++;
+				buf = &dev->tx_buffers[tx->id];
+			}
+		}
+	}
+
+	/*
+	 * The first fragment has the entire packet
+	 * size, subsequent fragments have just the
+	 * fragment size. The backend works out the
+	 * true size of the first fragment by
+	 * subtracting the sizes of the other
+	 * fragments.
+	 */
+	BUG_ON(first_p->tot_len != tot_len); /* broken pbuf?! */
+	first_tx->size = tot_len;
+	pbuf_ref(first_p); /* increase ref count */
+	buf->pbuf = first_p; /* remember chain for later release on last buf */
+	return tx;
+}
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 
 /**
  * Transmit function for pbufs which can handle checksum and segmentation offloading for TCPv4 and TCPv6
@@ -805,12 +921,18 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 #endif /* CONFIG_NETFRONT_GSO */
 		netfront_xmit_push(dev);
 #ifdef CONFIG_NETFRONT_WAITFORTX
-		add_waiter(w, netfront_txqueue); /* release thread until space is free'd */
-		local_irq_restore(flags);
-		schedule();
-		local_irq_save(flags);
-		remove_waiter(w, netfront_txqueue); /* release thread until space is free'd */
-		goto try_again;
+#ifdef CONFIG_NETFRONT_GSO
+		if (!netfront_tx_available(dev, slots + sego)) {
+#else
+		if (!netfront_tx_available(dev, slots)) {
+#endif /* CONFIG_NETFRONT_GSO */
+			add_waiter(w, netfront_txqueue); /* release thread until space is free'd */
+			local_irq_restore(flags);
+			schedule();
+			local_irq_save(flags);
+			remove_waiter(w, netfront_txqueue); /* release thread until space is free'd */
+			goto try_again;
+		}
 #else
 		return ERR_MEM;
 #endif /* CONFIG_NETFRONT_WAITFORTX */
@@ -840,8 +962,13 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 #endif /* CONFIG_NETFRONT_GSO */
 
 	/* Make TX requests for the pbuf */
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	netfront_make_txreqs_pgnt(dev, first_tx, p, &used);
+#else
+	netfront_make_txreqs(dev, first_tx, p, &used);
+#endif
 	ASSERT(slots >= used); /* we should have taken at most the number slots that we estimated before */
+	ASSERT(slots <= XEN_NETIF_NR_SLOTS_MIN); /* we should never take more slots than the backend supports */
 
 	/* partially checksummed (offload enabled), or checksummed */
 	first_tx->flags |= co_type ? ((NETTXF_csum_blank) | (NETTXF_data_validated)) : (NETTXF_data_validated);
@@ -1061,9 +1188,11 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 		add_id_to_freelist(i,dev->tx_freelist);
 		dev->tx_buffers[i].page = (char*)alloc_page();
 		BUG_ON(dev->tx_buffers[i].page == NULL);
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 		dev->tx_buffers[i].gref = gnttab_grant_access(dev->dom,
 							      virt_to_mfn(dev->tx_buffers[i].page), 1);
 		dprintk("tx[%d]: page = %p, gref=0x%x\n", i, dev->tx_buffers[i].page, dev->tx_buffers[i].gref);
+#endif
 	}
 	printk("net TX ring size %d, %lu KB\n", NET_TX_RING_SIZE, (unsigned long)(NET_TX_RING_SIZE * PAGE_SIZE)/1024);
 
