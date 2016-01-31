@@ -1,9 +1,8 @@
 /* Minimal network driver for Mini-OS.
  * Copyright (c) 2006-2007 Jacob Gorm Hansen, University of Copenhagen.
  * Copyright (c) 2014-2015 Joao Martins, NEC Europe Ltd.
+ * Copyright (c) 2015-2016 Simon Kuenzer, NEC Europe Ltd.
  * Based on netfront.c from Xen Linux.
- *
- * Does not handle fragments or extras for transmit.
  */
 #include <mini-os/os.h>
 #include <mini-os/mm.h>
@@ -57,9 +56,16 @@ DECLARE_WAIT_QUEUE_HEAD(netfront_txqueue);
 
 #define NET_TX_RING_SIZE __CONST_RING_SIZE(netif_tx, PAGE_SIZE)
 #define NET_RX_RING_SIZE __CONST_RING_SIZE(netif_rx, PAGE_SIZE)
+
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+#define NET_RX_BUFFERS NET_RX_RING_SIZE
+#endif
+
 #define GRANT_INVALID_REF 0
 
-struct net_buffer {
+struct netfront_dev;
+
+struct net_txbuffer {
 	void* page;
 	grant_ref_t gref;
 #ifdef HAVE_LWIP
@@ -67,14 +73,52 @@ struct net_buffer {
 #endif
 };
 
+struct net_rxbuffer {
+	void* page;
+	grant_ref_t gref;
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	unsigned short id;
+#ifdef HAVE_LWIP
+	struct netfront_dev *dev;
+	struct pbuf_custom cpbuf;
+#endif
+#endif
+};
+
+#if !defined CONFIG_NETFRONT_PERSISTENT_GRANTS && defined HAVE_LWIP
+#ifndef container_of
+/**
+ * container_of - cast a member of a structure out to the containing structure
+ * @ptr:        the pointer to the member.
+ * @type:       the type of the container struct this is embedded in.
+ * @member:     the name of the member within the struct.
+ *
+ */
+#define container_of(ptr, type, member) ({                      \
+        const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+        (type *)( (char *)__mptr - offsetof(type,member) );})
+#endif
+
+#define _upcast_pbuf2rxbuf(p) \
+  (container_of(container_of(p, struct pbuf_custom, pbuf), struct net_rxbuffer, cpbuf))
+#endif /* !CONFIG_NETFRONT_PERSISTENT_GRANTS && HAVE_LWIP */
+
 struct netfront_dev {
 	domid_t dom;
 
 	unsigned short tx_freelist[NET_TX_RING_SIZE + 1];
 	struct semaphore tx_sem;
 
-	struct net_buffer rx_buffers[NET_RX_RING_SIZE];
-	struct net_buffer tx_buffers[NET_TX_RING_SIZE];
+	struct net_txbuffer tx_buffers[NET_TX_RING_SIZE];
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	struct net_rxbuffer rx_buffers[NET_TX_RING_SIZE];
+#else
+	struct net_rxbuffer *rx_buffers[NET_TX_RING_SIZE];
+
+	struct net_rxbuffer rx_buffer_pool[NET_RX_BUFFERS];
+	unsigned short rx_freelist[NET_RX_BUFFERS + 1];
+	unsigned short rx_avail;
+#endif
 
 	struct netif_tx_front_ring tx;
 	struct netif_rx_front_ring rx;
@@ -85,7 +129,9 @@ struct netfront_dev {
 	struct netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX - 1];
 	/* used by pbuf_copy_bits */
 	struct pbuf *pbuf_cur;
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	uint32_t pbuf_off;
+#endif
 
 	grant_ref_t tx_ring_ref;
 	grant_ref_t rx_ring_ref;
@@ -134,6 +180,7 @@ struct netfront_dev_list {
 static struct netfront_dev_list *dev_list = NULL;
 
 static void init_rx_buffers(struct netfront_dev *dev);
+static void netfront_fillup_rx_buffers(struct netfront_dev *dev);
 static void netfront_tx_buf_gc(struct netfront_dev *dev);
 static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 					   unsigned char rawmac[6], char **ip);
@@ -183,6 +230,7 @@ struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev,
 	return NULL;
 }
 
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 /* Copies data to a pbuf */
 static inline void pbuf_copy_bits(struct pbuf **p, uint32_t *offset,
 				  unsigned char *data, int32_t len)
@@ -228,6 +276,64 @@ static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev, int32_t
 
   return p;
 }
+#else /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
+static void netfront_release_rxbuffer(struct net_rxbuffer *buf, struct netfront_dev *dev);
+
+static void netfront_free_rxpbuf(struct pbuf *p)
+{
+	struct net_rxbuffer *buf = _upcast_pbuf2rxbuf(p);
+	struct netfront_dev *dev;
+
+	dev = buf->dev;
+	netfront_release_rxbuffer(buf, dev);
+
+	if ((!p->next) || (!(p->next->flags & PBUF_FLAG_IS_CUSTOM)))
+		netfront_fillup_rx_buffers(dev);
+}
+
+static inline struct pbuf *netfront_init_rxpbuf(struct net_rxbuffer *buf, struct netfront_dev *dev)
+{
+	struct pbuf *p;
+
+	p = pbuf_alloced_custom(PBUF_RAW, PAGE_SIZE, PBUF_REF, &buf->cpbuf, buf->page, PAGE_SIZE);
+	if (p == NULL)
+		return NULL;
+
+	buf->dev = dev;
+	buf->cpbuf.custom_free_function = netfront_free_rxpbuf;
+	return p;
+}
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
+#endif /* HAVE_LWIP */
+
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+static struct net_rxbuffer *netfront_get_rxbuffer(struct netfront_dev *dev)
+{
+	struct net_rxbuffer *buf;
+	unsigned short id;
+
+	if (unlikely(dev->rx_avail == 0))
+		return NULL; /* out of rx buffers */
+
+	id = get_id_from_freelist(dev->rx_freelist);
+	buf = &dev->rx_buffer_pool[id];
+	buf->id = id;
+#ifdef HAVE_LWIP
+	if (unlikely(netfront_init_rxpbuf(buf, dev) == NULL)) {
+		/* could not allocate custom pbuf */
+		add_id_to_freelist(id, dev->rx_freelist);
+		return NULL;
+	}
+#endif /* HAVE_LWIP */
+	dev->rx_avail--;
+	return buf;
+}
+
+static void netfront_release_rxbuffer(struct net_rxbuffer *buf, struct netfront_dev *dev)
+{
+	add_id_to_freelist(buf->id, dev->rx_freelist);
+	dev->rx_avail--;
+}
 #endif
 
 /*
@@ -237,7 +343,7 @@ static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev, int32_t
  */
 static inline int handle_buffer(struct netfront_dev *dev,
 				struct netif_rx_response *rx,
-				struct net_buffer *buf, int32_t realsize)
+				struct net_rxbuffer *buf, int32_t realsize)
 {
 	unsigned char* page = buf->page;
 
@@ -254,7 +360,12 @@ static inline int handle_buffer(struct netfront_dev *dev,
 #endif
 #ifdef HAVE_LWIP
 	if (likely(dev->netif_rx_pbuf)) {
-		pbuf_copy_bits(&dev->pbuf_cur, &dev->pbuf_off, buf->page+rx->offset, rx->status);
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
+		pbuf_copy_bits(&dev->pbuf_cur, &dev->pbuf_off, (void *)((uintptr_t)buf->page+rx->offset), rx->status);
+#else
+		dev->pbuf_cur->tot_len = dev->pbuf_cur->len = rx->status;
+		dev->pbuf_cur->payload = (void *)((uintptr_t)buf->page+rx->offset);
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 		return 1;
 	}
 #endif
@@ -301,6 +412,9 @@ static int netfront_get_extras(struct netfront_dev *dev,
 	struct netif_extra_info *extra;
 	RING_IDX cons = dev->rx.rsp_cons;
 	int err = 0;
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	struct net_rxbuffer *buf;
+#endif
 
 	do {
 		extra = (struct netif_extra_info *)
@@ -317,6 +431,14 @@ static int netfront_get_extras(struct netfront_dev *dev,
 			NETIF_MEMCPY(&extras[extra->type - 1], extra,
 			       sizeof(*extra));
 		}
+
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+		buf = dev->rx_buffers[netfront_rxidx(cons)];
+		gnttab_end_access(buf->gref);
+		buf->gref = GRANT_INVALID_REF;
+		dev->rx_buffers[netfront_rxidx(cons)] = NULL;
+		netfront_release_rxbuffer(buf, dev);
+#endif
 	} while (extra->flags & XEN_NETIF_EXTRA_FLAG_MORE);
 
 	dev->rx.rsp_cons = cons;
@@ -339,12 +461,13 @@ static int netfront_get_responses(struct netfront_dev *dev,
 	int drop = 0;
 #ifdef HAVE_LWIP
 	struct pbuf *p;
+	struct pbuf *first_p;
 #endif
 
 	dprintk("rx: ring: len %d %s\n", size,
 		(flags & NETRXF_more_data ? "(more true) ": ""));
 
-	BUG_ON(id >= NET_TX_RING_SIZE);
+	BUG_ON(id >= NET_RX_RING_SIZE);
 
 	if (flags & NETRXF_extra_info) {
 		memset(dev->extras, 0, sizeof(dev->extras));
@@ -365,8 +488,14 @@ static int netfront_get_responses(struct netfront_dev *dev,
 
 #ifdef HAVE_LWIP
 	if (likely(dev->netif_rx_pbuf)) {
-	  p = netfront_alloc_pbuf(dev, realsize);
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	  first_p = p = netfront_alloc_pbuf(dev, realsize);
 	  drop = (p == NULL);
+#else
+	  first_p = p = &dev->rx_buffers[id]->cpbuf.pbuf;
+	  drop = 0;
+	  dev->pbuf_cur = p;
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 
 #if ETH_PAD_SIZE
 	  if (likely(!drop))
@@ -381,19 +510,43 @@ static int netfront_get_responses(struct netfront_dev *dev,
 			printk("rx: ring: rx->offset %d, size %d\n",
 				rsp->offset, size);
 		else if (likely(!drop))
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 			handle_buffer(dev, rsp, &dev->rx_buffers[id], realsize);
+#else
+			handle_buffer(dev, rsp, dev->rx_buffers[id], realsize);
+#endif
+
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+		gnttab_end_access(dev->rx_buffers[id]->gref);
+		dev->rx_buffers[id]->gref = GRANT_INVALID_REF;
+		dev->rx_buffers[id] = NULL;
+#endif
 
 		if (!(flags & NETRXF_more_data))
 			break;
 
 		rsp = RING_GET_RESPONSE(&dev->rx, cons + slots);
 		id = rsp->id;
+		BUG_ON(id >= NET_RX_RING_SIZE);
 		size = rsp->status;
 		flags = rsp->flags;
 		slots++;
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+		if (likely(dev->netif_rx_pbuf && (!drop))) {
+			/* set tot_len */
+			p->tot_len = realsize;
+			realsize -= p->len;
+			/* ..and link it to next pbuf */
+			p->next = &dev->rx_buffers[id]->cpbuf.pbuf;
+			dev->pbuf_cur = p = p->next;
+		} else {
+			netfront_release_rxbuffer(dev->rx_buffers[id], dev);
+		}
+#endif
 
-		dprintk("rx: ring: len %d %s\n", size,
-			(flags & NETRXF_more_data ? "(more true) ": ""));
+		dprintk("rx: ring: len %d %s %s\n", size,
+			(flags & NETRXF_more_data ? "(more true) ": ""),
+			(drop ? "DROP" : ""));
 	}
 
 	dev->rx.rsp_cons = cons + slots;
@@ -404,8 +557,7 @@ static int netfront_get_responses(struct netfront_dev *dev,
 #if ETH_PAD_SIZE
 	    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
 #endif /* ETH_PAD_SIZE */
-
-	    dev->netif_rx_pbuf(p, dev->netif_rx_arg); /* passes p=NULL when there was a drop */
+	    dev->netif_rx_pbuf(first_p, dev->netif_rx_arg); /* passes p=NULL when there was a drop */
 	  }
 #endif /* HAVE_LWIP */
 	} else {
@@ -414,12 +566,52 @@ static int netfront_get_responses(struct netfront_dev *dev,
 	return 1;
 }
 
+static void netfront_fillup_rx_buffers(struct netfront_dev *dev)
+{
+	RING_IDX prod;
+	struct netif_rx_request *req;
+	grant_ref_t ref;
+	unsigned short id;
+	int notify;
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	struct net_rxbuffer* buf;
+#endif
+
+	/* fill-up slots again */
+	for (prod = dev->rx.req_prod_pvt;
+	     prod - dev->rx.rsp_cons < NET_RX_RING_SIZE;
+	     prod++) {
+		id = netfront_rxidx(prod);
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+		buf = netfront_get_rxbuffer(dev);
+		if (buf == NULL)
+			break; /* out of rx buffers */
+		ref = gnttab_grant_access(dev->dom,virt_to_mfn(buf->page),0);
+		buf->gref = ref;
+		BUG_ON(ref == GRANT_INVALID_REF);
+		dev->rx_buffers[id] = buf;
+#else
+		ref = dev->rx_buffers[id].gref;
+#endif
+		req = RING_GET_REQUEST(&dev->rx, prod);
+		req->id = id;
+		req->gref = ref;
+	}
+
+	dev->rx.req_prod_pvt = prod;
+	wmb();
+	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->rx, notify);
+#ifdef CONFIG_SELECT_POLL
+	files[dev->fd].read = 0;
+#endif
+	if (notify)
+		notify_remote_via_evtchn(dev->rx_evtchn);
+}
+
 void netfront_rx(struct netfront_dev *dev)
 {
-	RING_IDX rp, cons, prod;
+	RING_IDX rp, cons;
 	struct netif_rx_response *rsp = &(dev->rsp);
-	struct netif_rx_request *req;
-	int notify;
 	int more;
 
 #ifdef CONFIG_NETMAP
@@ -444,25 +636,7 @@ moretodo:
 	if(more)
 		goto moretodo;
 
-	for (prod = dev->rx.req_prod_pvt;
-	     prod - dev->rx.rsp_cons < NET_RX_RING_SIZE;
-	     prod++) {
-		uint16_t id = netfront_rxidx(prod);
-		grant_ref_t ref = dev->rx_buffers[id].gref;
-
-		req = RING_GET_REQUEST(&dev->rx, prod);
-		req->id = id;
-		req->gref = ref;
-	}
-
-	dev->rx.req_prod_pvt = prod;
-	wmb();
-	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->rx, notify);
-#ifdef CONFIG_SELECT_POLL
-	files[dev->fd].read = 0;
-#endif
-	if (notify)
-		notify_remote_via_evtchn(dev->rx_evtchn);
+	netfront_fillup_rx_buffers(dev);
 }
 
 void netfront_rx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
@@ -580,7 +754,7 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 	RING_IDX cons, prod;
 	unsigned short id;
 #ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
-	struct net_buffer *buf;
+	struct net_txbuffer *buf;
 #endif
 
 	do {
@@ -594,8 +768,11 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 			if (txrsp->status == NETIF_RSP_NULL)
 				continue;
 
-			if (txrsp->status != NETIF_RSP_OKAY)
-				printk("netif error %d for tx\n", txrsp->status);
+			if (txrsp->status == NETIF_RSP_DROPPED)
+				printk("netif drop for rx\n");
+
+			if (txrsp->status == NETIF_RSP_ERROR)
+				printk("netif error for rx\n");
 
 			id  = txrsp->id;
 			BUG_ON(id >= NET_TX_RING_SIZE);
@@ -603,6 +780,7 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 #ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
 			buf = &dev->tx_buffers[id];
 			gnttab_end_access(buf->gref);
+			buf->gref = GRANT_INVALID_REF;
 #ifdef HAVE_LWIP
 			if (buf->pbuf) {
 				pbuf_free(buf->pbuf);
@@ -637,7 +815,7 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 {
 	struct netif_tx_request *tx;
 	unsigned short id;
-	struct net_buffer* buf;
+	struct net_txbuffer* buf;
 	int flags;
 
 	local_irq_save(flags);
@@ -657,7 +835,7 @@ static inline struct netif_tx_request *netfront_get_page(struct netfront_dev *de
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	tx->gref = buf->gref;
 #else
-	tx->gref = buf->gref = 0;
+	tx->gref = buf->gref = GRANT_INVALID_REF;
 #endif
 #ifdef HAVE_LWIP
 	buf->pbuf = NULL;
@@ -687,7 +865,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 {
 	int flags;
 	struct netif_tx_request *tx;
-	struct net_buffer* buf;
+	struct net_txbuffer* buf;
 	void* page;
 
 #ifdef CONFIG_NETMAP
@@ -816,7 +994,7 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 							    struct pbuf *p, int *slots)
 {
 	struct netif_tx_request *first_tx = tx;
-	struct net_buffer *buf;
+	struct net_txbuffer *buf;
 	struct pbuf *first_p = p;
 	struct pbuf *q;
 	unsigned long tot_len;
@@ -836,7 +1014,7 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 			/* read only mapping */
 			page = (void *)((((unsigned long) q->payload) & PAGE_MASK) + (s * PAGE_SIZE));
 			tx->gref = buf->gref = gnttab_grant_access(dev->dom, virtual_to_mfn(page), 0);
-			BUG_ON(tx->gref == 0);
+			BUG_ON(tx->gref == GRANT_INVALID_REF);
 
 			if (s == 0) /* first slot */
 				tx->offset = ((unsigned long) q->payload) & ~PAGE_MASK;
@@ -1036,13 +1214,28 @@ static void free_netfront(struct netfront_dev *dev)
 	if (separate_tx_rx_irq)
 		unbind_evtchn(dev->rx_evtchn);
 
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	for(i=0; i<NET_RX_RING_SIZE; i++) {
-		gnttab_end_access(dev->rx_buffers[i].gref);
-		free_page(dev->rx_buffers[i].page);
+		if (dev->rx_buffers[i].page) {
+			gnttab_end_access(dev->rx_buffers[i].gref);
+			free_page(dev->rx_buffers[i].page);
+		}
 	}
+#else
+	for(i=0; i<NET_RX_BUFFERS; i++) {
+		if (dev->rx_buffer_pool[i].page) {
+			if (dev->rx_buffer_pool[i].gref != GRANT_INVALID_REF)
+				gnttab_end_access(dev->rx_buffer_pool[i].gref);
+			free_page(dev->rx_buffer_pool[i].page);
+		}
+	}
+#endif
 
 	for(i=0; i<NET_TX_RING_SIZE; i++) {
 		if (dev->tx_buffers[i].page) {
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+			if (dev->tx_buffers[i].gref != GRANT_INVALID_REF)
+#endif
 			gnttab_end_access(dev->tx_buffers[i].gref);
 			free_page(dev->tx_buffers[i].page);
 		}
@@ -1186,7 +1379,7 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 	for(i=0;i<NET_TX_RING_SIZE;i++)
 	{
 		add_id_to_freelist(i,dev->tx_freelist);
-		dev->tx_buffers[i].page = (char*)alloc_page();
+		dev->tx_buffers[i].page = (void*)alloc_page();
 		BUG_ON(dev->tx_buffers[i].page == NULL);
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 		dev->tx_buffers[i].gref = gnttab_grant_access(dev->dom,
@@ -1196,14 +1389,29 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 	}
 	printk("net TX ring size %d, %lu KB\n", NET_TX_RING_SIZE, (unsigned long)(NET_TX_RING_SIZE * PAGE_SIZE)/1024);
 
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	for(i=0;i<NET_RX_RING_SIZE;i++)
 	{
 	/* TODO: that's a lot of memory */
-		dev->rx_buffers[i].page = (char*)alloc_page();
+		dev->rx_buffers[i].page = (void*)alloc_page();
 		BUG_ON(dev->rx_buffers[i].page == NULL);
 		dprintk("rx[%d]: page = %p\n", i, dev->rx_buffers[i].page);
 	}
 	printk("net RX ring size %d, %lu KB\n", NET_RX_RING_SIZE, (unsigned long)(NET_RX_RING_SIZE * PAGE_SIZE)/1024);
+#else
+	for(i=0;i<NET_RX_RING_SIZE;i++)
+		dev->rx_buffers[i] = NULL;
+	for(i=0;i<NET_RX_BUFFERS;i++)
+	{
+		/* allocate rx buffer pool */
+		dev->rx_buffer_pool[i].page = (void*)alloc_page();
+		BUG_ON(dev->rx_buffer_pool[i].page == NULL);
+		dprintk("rx[%d]: page = %p\n", i, dev->rx_buffer_pool[i].page);
+		add_id_to_freelist(i,dev->rx_freelist);
+	}
+	dev->rx_avail = NET_RX_BUFFERS;
+	printk("net RX ring size %d, %lu KB buffer space\n", NET_RX_RING_SIZE, (unsigned long)(NET_RX_BUFFERS * PAGE_SIZE)/1024);
+#endif
 
 	if (feature_split_evtchn) {
 		evtchn_alloc_unbound(dev->dom, netfront_tx_handler, dev,
@@ -1223,6 +1431,9 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 		dev->rx_evtchn = dev->tx_evtchn;
 	}
 
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	printk("persistent grants enabled\n");
+#endif
 
 	txs = (struct netif_tx_sring *) alloc_page();
 	rxs = (struct netif_rx_sring *) alloc_page();
@@ -1543,17 +1754,26 @@ void resume_netfront(void)
 
 void init_rx_buffers(struct netfront_dev *dev)
 {
+	struct net_rxbuffer* buf;
 	int i, requeue_idx;
 	netif_rx_request_t *req;
 	int notify;
 
 	/* Rebuild the RX buffer freelist and the RX ring itself. */
 	for (requeue_idx = 0, i = 0; i < NET_RX_RING_SIZE; i++) {
-		struct net_buffer* buf = &dev->rx_buffers[requeue_idx];
 		req = RING_GET_REQUEST(&dev->rx, requeue_idx);
 
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+		buf = netfront_get_rxbuffer(dev);
+		if (buf == NULL)
+			break; /* out of rx buffers */
+		dev->rx_buffers[requeue_idx] = buf;
+#else
+		buf = &dev->rx_buffers[requeue_idx];
+#endif
 		buf->gref = req->gref =
 			gnttab_grant_access(dev->dom,virt_to_mfn(buf->page),0);
+		BUG_ON(buf->gref == GRANT_INVALID_REF);
 
 		req->id = requeue_idx;
 

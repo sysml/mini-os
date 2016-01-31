@@ -48,7 +48,11 @@ typedef uintptr_t mem_ptr_t;
 
 /* 32 bit checksum calculation */
 #define LWIP_CHKSUM_ALGORITHM 3
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 #define ETH_PAD_SIZE 2
+#else
+#define ETH_PAD_SIZE 0
+#endif
 
 /* rand */
 #define LWIP_RAND() ((u32_t)rand())
