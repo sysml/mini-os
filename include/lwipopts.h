@@ -155,6 +155,14 @@ void lwip_free(void *ptr);
 #define TCP_WND 262142
 #define TCP_SND_BUF ( 1024 * 1024 )
 
+#else /* LWIP_WND_SCALE */
+/*
+ * Options when no window scaling  is enabled
+ */
+#define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
+#define TCP_SND_BUF (TCP_WND + (2 * TCP_MSS))
+#endif /* LWIP_WND_SCALE */
+
 #ifdef CONFIG_NETFRONT_GSO
 #define TCP_GSO 1
 #define TCP_GSO_MAX_SEGS 15
@@ -171,14 +179,6 @@ void lwip_free(void *ptr);
 #undef TCP_OVERSIZE
 #define TCP_OVERSIZE 0
 #endif /* CONFIG_NETFRONT_GSO */
-
-#else /* LWIP_WND_SCALE */
-/*
- * Options when no window scaling  is enabled
- */
-#define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
-#define TCP_SND_BUF (TCP_WND + (2 * TCP_MSS))
-#endif /* LWIP_WND_SCALE */
 
 #define TCP_SND_QUEUELEN (2 * (TCP_SND_BUF) / (TCP_MSS))
 #define TCP_QUEUE_OOSEQ 4
