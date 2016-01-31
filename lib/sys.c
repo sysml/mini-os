@@ -260,7 +260,7 @@ int read(int fd, void *buf, size_t nbytes)
 	case FTYPE_SOCKET:
 	    return lwip_read(files[fd].socket.fd, buf, nbytes);
 #endif
-#ifdef CONFIG_NETFRONT
+#if defined CONFIG_NETFRONT && !defined CONFIG_NETFRONT_LWIP_ONLY
 	case FTYPE_TAP: {
 	    ssize_t ret;
 	    ret = netfront_receive(files[fd].tap.dev, buf, nbytes);
@@ -341,7 +341,7 @@ int write(int fd, const void *buf, size_t nbytes)
 	case FTYPE_SOCKET:
 	    return lwip_write(files[fd].socket.fd, (void*) buf, nbytes);
 #endif
-#ifdef CONFIG_NETFRONT
+#if defined CONFIG_NETFRONT && !defined CONFIG_NETFRONT_LWIP_ONLY
 	case FTYPE_TAP:
 	    netfront_xmit(files[fd].tap.dev, (void*) buf, nbytes);
 	    return nbytes;

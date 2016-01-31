@@ -66,7 +66,9 @@ DECLARE_WAIT_QUEUE_HEAD(netfront_txqueue);
 struct netfront_dev;
 
 struct net_txbuffer {
+#if defined CONFIG_NETFRONT_PERSISTENT_GRANTS || !defined CONFIG_NETFRONT_LWIP_ONLY
 	void* page;
+#endif
 	grant_ref_t gref;
 #ifdef HAVE_LWIP
 	struct pbuf *pbuf;
@@ -369,8 +371,10 @@ static inline int handle_buffer(struct netfront_dev *dev,
 		return 1;
 	}
 #endif
+#ifndef CONFIG_NETFRONT_LWIP_ONLY
 	if (dev->netif_rx)
 		dev->netif_rx(page+rx->offset, rx->status, dev->netif_rx_arg);
+#endif
 	return 1;
 }
 
@@ -737,6 +741,9 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data,
 }
 #endif
 
+#ifdef CONFIG_NETFRONT_LWIP_ONLY
+static
+#endif
 void netfront_set_rx_handler(struct netfront_dev *dev,
 			     void (*thenetif_rx)(unsigned char *data, int len,
 						 void *arg),
@@ -858,6 +865,7 @@ static inline void netfront_xmit_notify(struct netfront_dev *dev)
 		notify_remote_via_evtchn(dev->tx_evtchn);
 }
 
+#ifndef CONFIG_NETFRONT_LWIP_ONLY
 /**
  * Transmit function for raw buffers (non-GSO/TCO)
  */
@@ -900,6 +908,7 @@ out:
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
 }
+#endif
 
 #ifdef HAVE_LWIP
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
@@ -1231,6 +1240,7 @@ static void free_netfront(struct netfront_dev *dev)
 	}
 #endif
 
+#if defined CONFIG_NETFRONT_PERSISTENT_GRANTS || !defined CONFIG_NETFRONT_LWIP_ONLY
 	for(i=0; i<NET_TX_RING_SIZE; i++) {
 		if (dev->tx_buffers[i].page) {
 #ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
@@ -1240,6 +1250,7 @@ static void free_netfront(struct netfront_dev *dev)
 			free_page(dev->tx_buffers[i].page);
 		}
 	}
+#endif
 }
 
 struct netfront_dev *init_netfront(char *_nodename,
@@ -1379,6 +1390,7 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 	for(i=0;i<NET_TX_RING_SIZE;i++)
 	{
 		add_id_to_freelist(i,dev->tx_freelist);
+#if defined CONFIG_NETFRONT_PERSISTENT_GRANTS || !defined CONFIG_NETFRONT_LWIP_ONLY
 		dev->tx_buffers[i].page = (void*)alloc_page();
 		BUG_ON(dev->tx_buffers[i].page == NULL);
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
@@ -1386,8 +1398,13 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 							      virt_to_mfn(dev->tx_buffers[i].page), 1);
 		dprintk("tx[%d]: page = %p, gref=0x%x\n", i, dev->tx_buffers[i].page, dev->tx_buffers[i].gref);
 #endif
+#endif
 	}
+#if defined CONFIG_NETFRONT_PERSISTENT_GRANTS || !defined CONFIG_NETFRONT_LWIP_ONLY
 	printk("net TX ring size %d, %lu KB\n", NET_TX_RING_SIZE, (unsigned long)(NET_TX_RING_SIZE * PAGE_SIZE)/1024);
+#else
+	printk("net TX ring size %d\n", NET_TX_RING_SIZE);
+#endif
 
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	for(i=0;i<NET_RX_RING_SIZE;i++)
