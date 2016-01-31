@@ -712,6 +712,7 @@ int netfront_tap_open(char *nodename)
 	return dev->fd;
 }
 
+#ifndef CONFIG_NETFRONT_LWIP_ONLY
 ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data,
 			 size_t len)
 {
@@ -739,6 +740,7 @@ ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data,
 
 	return dev->rlen;
 }
+#endif
 #endif
 
 #ifdef CONFIG_NETFRONT_LWIP_ONLY

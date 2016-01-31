@@ -26,7 +26,9 @@ void suspend_netfront(void);
 void resume_netfront(void);
 #ifdef HAVE_LIBC
 int netfront_tap_open(char *nodename);
+#ifndef CONFIG_NETFRONT_LWIP_ONLY
 ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data, size_t len);
+#endif
 #endif
 
 extern struct wait_queue_head netfront_queue;
