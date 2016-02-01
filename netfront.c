@@ -510,15 +510,16 @@ static int netfront_get_responses(struct netfront_dev *dev,
 
 	for (;;) {
 		if (unlikely(rsp->status < 0 ||
-			     (rsp->offset + rsp->status > PAGE_SIZE)))
-			printk("rx: ring: rx->offset %d, size %d\n",
-				rsp->offset, size);
-		else if (likely(!drop))
+			     (rsp->offset + rsp->status > PAGE_SIZE))) {
+			printk("rx: ring<%u>: rx->offset %d, status %d\n",
+			       cons + slots, rsp->offset, size);
+		} else if (likely(!drop)) {
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 			handle_buffer(dev, rsp, &dev->rx_buffers[id], realsize);
 #else
 			handle_buffer(dev, rsp, dev->rx_buffers[id], realsize);
 #endif
+		}
 
 #ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
 		gnttab_end_access(dev->rx_buffers[id]->gref);
@@ -555,19 +556,45 @@ static int netfront_get_responses(struct netfront_dev *dev,
 
 	dev->rx.rsp_cons = cons + slots;
 
-	if (likely(!drop)) {
+	if (unlikely(drop))
+		goto err_drop;
+
 #ifdef HAVE_LWIP
-	  if (likely(dev->netif_rx_pbuf)) {
+	if (likely(dev->netif_rx_pbuf)) {
 #if ETH_PAD_SIZE
-	    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
+		pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
 #endif /* ETH_PAD_SIZE */
-	    dev->netif_rx_pbuf(first_p, dev->netif_rx_arg); /* passes p=NULL when there was a drop */
-	  }
-#endif /* HAVE_LWIP */
-	} else {
-	  dprintk("  rx: dropped\n");
+		if (first_p->ref != 1)
+		  printk("first_p->ref = %u\n", first_p->ref);
+		dev->netif_rx_pbuf(first_p, dev->netif_rx_arg);
 	}
+#endif /* HAVE_LWIP */
 	return 1;
+
+ err_drop:
+	dprintk("  rx: dropped\n");
+#ifdef HAVE_LWIP
+	if (first_p) {
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
+		pbuf_free(first_p);
+#else /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
+		struct pbuf *next;
+
+		/* unchain pbuf and release */
+		p = first_p;
+		while (p != NULL) {
+			next = p->next;
+			p->tot_len = p->len;
+			p->next = NULL;
+			netfront_free_rxpbuf(p);
+			p = next;
+		}
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
+	}
+	if (likely(dev->netif_rx_pbuf))
+		dev->netif_rx_pbuf(NULL, dev->netif_rx_arg); /* notify drop */
+#endif
+	return 0;
 }
 
 static void netfront_fillup_rx_buffers(struct netfront_dev *dev)
