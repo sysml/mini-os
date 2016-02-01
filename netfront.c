@@ -612,8 +612,12 @@ static void netfront_fillup_rx_buffers(struct netfront_dev *dev)
 	int notify;
 #ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	struct net_rxbuffer* buf;
+	int flags;
 #endif
 
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	local_irq_save(flags);
+#endif
 	/* fill-up slots again */
 	for (prod = dev->rx.req_prod_pvt;
 	     prod - dev->rx.rsp_cons < NET_RX_RING_SIZE;
@@ -635,6 +639,9 @@ static void netfront_fillup_rx_buffers(struct netfront_dev *dev)
 		req->id = id;
 		req->gref = ref;
 	}
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+	local_irq_restore(flags);
+#endif
 
 	if (dev->rx.req_prod_pvt != prod) {
 		dev->rx.req_prod_pvt = prod;
@@ -932,7 +939,7 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 	page = buf->page;
 #ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
 	tx->gref = buf->gref = gnttab_grant_access(dev->dom,
-						   virt_to_mfn(page), 1);
+						   virt_to_mfn(page), 0);
 	BUG_ON(tx->gref == GRANT_INVALID_REF);
 #endif
 	NETIF_MEMCPY(page, data, len);
@@ -1061,7 +1068,7 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 		for (s = 0; s < q_slots; ++s) {
 			/* read only mapping */
 			page = (void *)((((unsigned long) q->payload) & PAGE_MASK) + (s * PAGE_SIZE));
-			tx->gref = buf->gref = gnttab_grant_access(dev->dom, virtual_to_mfn(page), 1);
+			tx->gref = buf->gref = gnttab_grant_access(dev->dom, virtual_to_mfn(page), 0);
 			BUG_ON(tx->gref == GRANT_INVALID_REF);
 
 			if (s == 0) /* first slot */
@@ -1434,7 +1441,7 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 		BUG_ON(dev->tx_buffers[i].page == NULL);
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 		dev->tx_buffers[i].gref = gnttab_grant_access(dev->dom,
-							      virt_to_mfn(dev->tx_buffers[i].page), 1);
+							      virt_to_mfn(dev->tx_buffers[i].page), 0);
 		BUG_ON(dev->tx_buffers[i].gref == GRANT_INVALID_REF);
 		dprintk("tx[%d]: page = %p, gref=0x%x\n", i, dev->tx_buffers[i].page, dev->tx_buffers[i].gref);
 #endif
