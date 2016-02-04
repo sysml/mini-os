@@ -5,8 +5,11 @@ ifndef XEN_ROOT
 $(error "Please define XEN_ROOT")
 endif
 
+CONFIG_LWIP ?= n
+ifeq ($(CONFIG_LWIP),y)
 ifndef LWIP_ROOT
 $(error "Please define LWIP_ROOT")
+endif
 endif
 
 ifndef NEWLIB_ROOT
@@ -134,7 +137,6 @@ CONFIG_CONSFRONT		?= n
 CONFIG_CONSFRONT_SYNC		?= n
 CONFIG_XENBUS			?= y
 CONFIG_XC				?= y
-CONFIG_LWIP				?= y
 CONFIG_LWIP_NOTHREADS			?= n
 CONFIG_LWIP_HEAP_ONLY			?= n
 CONFIG_LWIP_POOLS_ONLY			?= n
@@ -159,8 +161,6 @@ MINIOS_OBJS0-y		:=	\
 	hypervisor.o		\
 	kernel.o			\
 	lock.o				\
-	lwip-arch.o			\
-	lwip-net.o			\
 	main.o				\
 	math.o				\
 	mm.o				\
