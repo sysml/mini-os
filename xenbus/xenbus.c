@@ -833,7 +833,9 @@ domid_t xenbus_get_self_id(void)
     char *dom_id;
     domid_t ret;
 
-    BUG_ON(xenbus_read(XBT_NIL, "domid", &dom_id));
+    if (xenbus_read(XBT_NIL, "domid", &dom_id)) {
+	    BUG_ON(1);
+    }
     sscanf(dom_id, "%"SCNd16, &ret);
 
     return ret;
