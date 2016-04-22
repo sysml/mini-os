@@ -465,7 +465,7 @@ moretodo:
 void netfront_rx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
 	struct netfront_dev *dev = data;
-	int fd = dev->fd;
+	int fd __maybe_unused = dev->fd;
 
 #ifdef CONFIG_SELECT_POLL
 	if (fd != -1)

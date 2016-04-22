@@ -1384,7 +1384,10 @@ void *mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset
     else if (files[fd].type == FTYPE_MEM) {
         unsigned long first_mfn = offset >> PAGE_SHIFT;
         return map_frames_ex(&first_mfn, n, 0, 1, 1, DOMID_IO, NULL, _PAGE_PRESENT|_PAGE_RW);
-    } else ASSERT(0);
+    }
+    // error: try to raise an assertion in debug mode, bug out otherwise.
+    ASSERT(0);
+    BUG();
 }
 
 int munmap(void *start, size_t length)

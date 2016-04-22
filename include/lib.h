@@ -127,6 +127,17 @@ do {                                                           \
 
 #define BUG_ON(x) ASSERT(!(x))
 
+/* Mark variables that may be unused due to, e.g., evaluation of preprocessor
+ * macro. A good example is checking variables only in ASSERT() or BUG_ON(),
+ * so the variables will be unusued in non-debug builds.
+ * To keep portability, only attach the attribute when using gcc.
+ */
+#ifdef __GNUC__
+#define __maybe_unused __attribute__((unused))
+#else
+#define __maybe_unused
+#endif
+
 /* Consistency check as much as possible. */
 void sanity_check(void);
 
