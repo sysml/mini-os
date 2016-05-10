@@ -495,8 +495,6 @@ CFLAGS			+= -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
 CXXFLAGS		+= -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
 endif
 
--include $(DEPS)
-
 
 ################################################################################
 # Linking external apps
@@ -529,6 +527,8 @@ CXXDEFINES			+= $(STUB_CXXDEFINES)
 BUILD_DIRS			+= $(STUB_BUILD_DIRS)
 BUILD_DIRS			+= $(STUB_APP_OBJ_DIR)
 DEPS				+= $(STUB_APP_DEPS)
+
+-include $(DEPS)
 
 
 # Default build for c/c++ stub objects
