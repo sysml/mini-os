@@ -538,6 +538,10 @@ $(STUB_APP_OBJ_DIR)/%.o: $(STUB_APP_SRC_DIR)/%.c | build-reqs
 $(STUB_APP_OBJ_DIR)/%.o: $(STUB_APP_SRC_DIR)/%.cc | build-reqs
 	$(call cxxcompile,$(STUB_APP_INCLUDES) -c $< -o $@,'CXX')
 
+$(STUB_APP_OBJ_DIR)/%.o: $(STUB_APP_SRC_DIR)/%.S | build-reqs
+	$(call ascompile,-c $< -o $@,'CC ')
+#        $(call ascompile,$(STUB_APP_INCLUDES) -c $< -o $@,'CXX')
+
 # Default linking for stub objects
 $(STUB_APP).o: $(STUB_APP_OBJS) $(MINIOS_LDS)
 	$(call verbose_cmd,$(LD) -r -d $(LDFLAGS) -\( $(STUB_APP_OBJS) -\) $(STUB_LDLIBS) -T $(MINIOS_LDS) --undefined main -o,'LD ',$@)
