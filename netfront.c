@@ -216,7 +216,7 @@ static inline struct pbuf *netfront_alloc_pbuf(struct netfront_dev *dev, int32_t
 {
   struct pbuf *p;
 
-  if (unlikely((len + ETH_PAD_SIZE) > 0xFFFF || len <= 0))
+  if (unlikely((len) > (0xFFFF - ETH_PAD_SIZE) || len <= 0))
     return NULL; /* unsupported length: ignore */
 
   p = pbuf_alloc(PBUF_RAW, (u16_t) (len + ETH_PAD_SIZE), PBUF_POOL);
