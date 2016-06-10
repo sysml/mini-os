@@ -56,6 +56,7 @@ TOUCH		 = touch
 
 STRIP		 = strip
 OBJCOPY		 = objcopy
+NM		 = nm
 
 CXXCOMPILE	 = $(CXX) $(CDEFINES) $(CINCLUDES) $(CPPFLAGS) $(CXXFLAGS)
 CXXLD		 = $(CXX)
@@ -557,6 +558,7 @@ $(STUB_APP_IMG).o: $(STUB_APP_IMG)_.o
 
 $(STUB_APP_IMG): $(STUB_APP_IMG).o
 	$(call verbose_cmd,$(LD) $(LDFLAGS) -T $(MINIOS_ARCH_LDS) $@.o -o,'LD ',$@)
+	$(call verbose_cmd,$(NM) -n $@ >,'SYM',$@.syms)
 ifneq ($(debug),y)
 	$(call verbose_cmd,cp $@ , 'CP', $@_nostrip)
 	$(call verbose_cmd,$(STRIP) -s,'STR',$@)
@@ -584,7 +586,7 @@ clean-stub:
 
 distclean-stub:
 	$(call verbose_cmd,$(RM)												\
-		$(STUB_APP).o $(STUB_APP_IMG).o $(STUB_APP_IMG) $(STUB_APP_IMG).gz,	\
+		$(STUB_APP).o $(STUB_APP_IMG).o $(STUB_APP_IMG) $(STUBS_APP_IMG).syms $(STUB_APP_IMG).gz,	\
 		'CLN $(STUB_APP_IMG)')
 
 .PHONY: banner
