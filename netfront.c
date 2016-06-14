@@ -833,6 +833,7 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 			buf = &dev->tx_buffers[id];
 			gnttab_end_access(buf->gref);
 			buf->gref = GRANT_INVALID_REF;
+			free_page(buf->page);
 #ifdef HAVE_LWIP
 			if (buf->pbuf) {
 				pbuf_free(buf->pbuf);
@@ -1029,10 +1030,8 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
 	return tx;
 }
 #else /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
-#define _count_pages(ptr, len)						\
-  ((len == 0) ? 0 : (1 +						\
-		     (((((uintptr_t)(ptr)) + (len)) >> (PAGE_SHIFT)) -	\
-		      (((uintptr_t)(ptr)) >> (PAGE_SHIFT)))))
+#define _count_pages(len)						\
+  ((len == 0) ? 0 : (1 + (len / PAGE_SIZE)))
 
 static inline unsigned long netfront_count_pbuf_slots(struct netfront_dev *dev, const struct pbuf *p)
 {
@@ -1040,7 +1039,7 @@ static inline unsigned long netfront_count_pbuf_slots(struct netfront_dev *dev, 
 	unsigned long slots = 0;
 
 	for (q = p; q != NULL; q = q->next)
-	  slots += (unsigned long) _count_pages(q->payload, q->len);
+	  slots += (unsigned long) _count_pages(q->len);
 	return slots;
 }
 
@@ -1056,32 +1055,30 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 	unsigned long s;
 	void *page;
 	int q_slots;
+	size_t plen, left;
 
 	tot_len = 0;
 	buf = &dev->tx_buffers[tx->id];
 
 	/* map pages of pbuf */
 	for (q = p; q != NULL; q = q->next) {
-		q_slots = (int) _count_pages(q->payload, q->len);
-
+		left = q->len;
+		q_slots = (int) _count_pages(q->len);
 		/* grant pages of pbuf */
 		for (s = 0; s < q_slots; ++s) {
 			/* read only mapping */
-			page = (void *)((((unsigned long) q->payload) & PAGE_MASK) + (s * PAGE_SIZE));
+			page = (void *) alloc_page();
+			buf->page = page;
+			plen = min(PAGE_SIZE, left);
+			memcpy(page, q->payload + s * PAGE_SIZE, plen);
 			tx->gref = buf->gref = gnttab_grant_access(dev->dom, virtual_to_mfn(page), 0);
 			BUG_ON(tx->gref == GRANT_INVALID_REF);
 
-			if (s == 0) /* first slot */
-				tx->offset = ((unsigned long) q->payload) & ~PAGE_MASK;
-			else
-				tx->offset = 0;
-
-			if ((s + 1) == q_slots) /* last slot */
-				tx->size   = ((((unsigned long) q->payload) + q->len) & ~PAGE_MASK) - tx->offset;
-			else
-				tx->size   = PAGE_SIZE - tx->offset;
+			tx->offset = 0;
+			tx->size   = plen;
 
 			tot_len += tx->size;
+			left -= plen;
 
 			if ((s + 1) < q_slots || q->next != NULL) {
 				/* there will be a follow-up slot */
