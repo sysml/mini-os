@@ -1103,6 +1103,8 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 	 */
 	BUG_ON(first_p->tot_len != tot_len); /* broken pbuf?! */
 	first_tx->size = tot_len;
+	pbuf_ref(first_p); /* increase ref count */
+	buf->pbuf = first_p; /* remember chain for later release on last buf */
 	return tx;
 }
 #endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
