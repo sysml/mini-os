@@ -533,6 +533,9 @@ static int netfront_get_responses(struct netfront_dev *dev,
 		if (!(flags & NETRXF_more_data))
 			break;
 
+		if (dev->rx.sring->rsp_prod <= cons + slots)
+			break;
+
 		rsp = RING_GET_RESPONSE(&dev->rx, cons + slots);
 		id = rsp->id;
 		BUG_ON(id >= NET_RX_RING_SIZE);
