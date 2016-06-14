@@ -593,7 +593,6 @@ static int netfront_get_responses(struct netfront_dev *dev,
 			netfront_free_rxpbuf(p);
 			p = next;
 		}
-	netfront_fillup_rx_buffers(dev);
 #endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 	}
 	if (likely(dev->netif_rx_pbuf))
