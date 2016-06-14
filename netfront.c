@@ -336,7 +336,7 @@ static struct net_rxbuffer *netfront_get_rxbuffer(struct netfront_dev *dev)
 static void netfront_release_rxbuffer(struct net_rxbuffer *buf, struct netfront_dev *dev)
 {
 	add_id_to_freelist(buf->id, dev->rx_freelist);
-	dev->rx_avail--;
+	dev->rx_avail++;
 }
 #endif
 
