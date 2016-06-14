@@ -2,6 +2,7 @@
  * Copyright (c) 2006-2007 Jacob Gorm Hansen, University of Copenhagen.
  * Copyright (c) 2014-2015 Joao Martins, NEC Europe Ltd.
  * Copyright (c) 2015-2016 Simon Kuenzer, NEC Europe Ltd.
+ * Copyright (c) 2016      Kenichi Yasukata, NEC Europe Ltd.
  * Based on netfront.c from Xen Linux.
  */
 #include <mini-os/os.h>
