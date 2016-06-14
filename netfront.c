@@ -1143,7 +1143,6 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 
 #ifdef CONFIG_NETFRONT_WAITFORTX
 	local_irq_save(flags);
- try_again:
 #endif /* CONFIG_NETFRONT_WAITFORTX */
 #ifdef CONFIG_NETFRONT_GSO
 	if (unlikely(!netfront_tx_available(dev, slots + sego))) {
@@ -1152,6 +1151,7 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 #endif /* CONFIG_NETFRONT_GSO */
 		netfront_xmit_push(dev);
 #ifdef CONFIG_NETFRONT_WAITFORTX
+ try_again:
 #ifdef CONFIG_NETFRONT_GSO
 		if (!netfront_tx_available(dev, slots + sego)) {
 #else
@@ -1161,9 +1161,9 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 			local_irq_restore(flags);
 			schedule();
 			local_irq_save(flags);
-			remove_waiter(w, netfront_txqueue); /* release thread until space is free'd */
 			goto try_again;
 		}
+		remove_waiter(w, netfront_txqueue); /* release thread until space is free'd */
 #else
 		return ERR_MEM;
 #endif /* CONFIG_NETFRONT_WAITFORTX */
