@@ -292,9 +292,6 @@ static void netfront_free_rxpbuf(struct pbuf *p)
 
 	dev = buf->dev;
 	netfront_release_rxbuffer(buf, dev);
-
-	if ((!p->next) || (!(p->next->flags & PBUF_FLAG_IS_CUSTOM)))
-		netfront_fillup_rx_buffers(dev);
 }
 
 static inline struct pbuf *netfront_init_rxpbuf(struct net_rxbuffer *buf, struct netfront_dev *dev)
@@ -595,6 +592,7 @@ static int netfront_get_responses(struct netfront_dev *dev,
 			netfront_free_rxpbuf(p);
 			p = next;
 		}
+	netfront_fillup_rx_buffers(dev);
 #endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 	}
 	if (likely(dev->netif_rx_pbuf))
