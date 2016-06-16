@@ -707,7 +707,7 @@ void netfront_tx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 	struct netfront_dev *dev = data;
 
 	local_irq_save(flags);
-	netfront_tx_buf_gc(dev);
+	netfront_tx_buf_gc(dev); /* might cause race condition on lwip's pbuf pools */
 	local_irq_restore(flags);
 #endif
 
@@ -834,7 +834,6 @@ static void netfront_tx_buf_gc(struct netfront_dev *dev)
 			buf = &dev->tx_buffers[id];
 			gnttab_end_access(buf->gref);
 			buf->gref = GRANT_INVALID_REF;
-			free_page(buf->page);
 #ifdef HAVE_LWIP
 			if (buf->pbuf) {
 				pbuf_free(buf->pbuf);
@@ -1065,21 +1064,25 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 	for (q = p; q != NULL; q = q->next) {
 		left = q->len;
 		q_slots = (int) _count_pages(q->len);
+
 		/* grant pages of pbuf */
 		for (s = 0; s < q_slots; ++s) {
 			/* read only mapping */
-			page = (void *) alloc_page();
-			buf->page = page;
-			plen = min(PAGE_SIZE, left);
-			memcpy(page, q->payload + s * PAGE_SIZE, plen);
+			page = (void *)((((unsigned long) q->payload) & PAGE_MASK) + (s * PAGE_SIZE));
 			tx->gref = buf->gref = gnttab_grant_access(dev->dom, virtual_to_mfn(page), 0);
 			BUG_ON(tx->gref == GRANT_INVALID_REF);
 
-			tx->offset = 0;
-			tx->size   = plen;
+			if (s == 0) /* first slot */
+				tx->offset = ((unsigned long) q->payload) & ~PAGE_MASK;
+			else
+				tx->offset = 0;
+
+			if ((s + 1) == q_slots) /* last slot */
+				tx->size   = ((((unsigned long) q->payload) + q->len) & ~PAGE_MASK) - tx->offset;
+			else
+				tx->size   = PAGE_SIZE - tx->offset;
 
 			tot_len += tx->size;
-			left -= plen;
 
 			if ((s + 1) < q_slots || q->next != NULL) {
 				/* there will be a follow-up slot */
