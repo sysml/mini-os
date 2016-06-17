@@ -14,7 +14,12 @@
 #include <lwip/sys.h>
 #include <stdarg.h>
 
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+/* For avoiding that an ether header is splited into two pages. */
 #define MIN_ALIGN 64
+#else
+#define MIN_ALIGN 8
+#endif
 
 /* Initializes a new semaphore. The "count" argument specifies
  * the initial state of the semaphore. */
