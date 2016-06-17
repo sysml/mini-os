@@ -14,7 +14,7 @@
 #include <lwip/sys.h>
 #include <stdarg.h>
 
-#define MIN_ALIGN 8
+#define MIN_ALIGN 64
 
 /* Initializes a new semaphore. The "count" argument specifies
  * the initial state of the semaphore. */
