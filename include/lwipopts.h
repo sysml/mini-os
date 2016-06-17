@@ -172,7 +172,7 @@ void lwip_free(void *ptr);
 #else
 #include <xen/io/netif.h>
 #define TCP_SEG_LIMIT_PBUF_CLEN 1
-#define TCP_SEG_MAX_PBUF_CLEN (XEN_NETIF_NR_SLOTS_MIN / 2)
+#define TCP_SEG_MAX_PBUF_CLEN ((XEN_NETIF_NR_SLOTS_MIN / 2) - 1)
 #define TCP_GSO_SEG_LEN (TCP_SEG_MAX_PBUF_CLEN * PAGE_SIZE)
 #endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 
