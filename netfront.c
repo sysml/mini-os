@@ -660,8 +660,11 @@ void netfront_rx(struct netfront_dev *dev)
 {
 	RING_IDX rp, cons;
 	struct netif_rx_response *rsp = &(dev->rsp);
-	int more;
+	int more, flags;
 
+	local_irq_save(flags);
+	netfront_tx_buf_gc(dev);
+	local_irq_restore(flags);
 #ifdef CONFIG_NETMAP
 	if (dev->netmap) {
 		netmap_netfront_rx(dev);
