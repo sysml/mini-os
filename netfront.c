@@ -702,15 +702,6 @@ void netfront_rx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 
 void netfront_tx_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
-#if !(defined HAVE_LWIP) || (defined CONFIG_NETFRONT_PERSISTENT_GRANTS)
-	int flags;
-	struct netfront_dev *dev = data;
-
-	local_irq_save(flags);
-	netfront_tx_buf_gc(dev); /* might cause race condition on lwip's pbuf pools */
-	local_irq_restore(flags);
-#endif
-
 #ifdef CONFIG_NETFRONT_WAITFORTX
 	wake_up(&netfront_txqueue);
 #endif
@@ -727,13 +718,6 @@ void netfront_select_handler(evtchn_port_t port, struct pt_regs *regs, void *dat
 {
 	struct netfront_dev *dev = data;
 	int fd = dev->fd;
-#if !(defined HAVE_LWIP) || (defined CONFIG_NETFRONT_PERSISTENT_GRANTS)
-	int flags;
-
-	local_irq_save(flags);
-	netfront_tx_buf_gc(dev);
-	local_irq_restore(flags);
-#endif
 
 	if (fd != -1)
 		files[fd].read = 1;
@@ -1164,6 +1148,7 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 			local_irq_restore(flags);
 			schedule();
 			local_irq_save(flags);
+			netfront_tx_buf_gc(dev);
 			goto try_again;
 		}
 		remove_waiter(w, netfront_txqueue); /* release thread until space is free'd */
