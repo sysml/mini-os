@@ -76,7 +76,7 @@ void lwip_free(void *ptr);
 #define mem_free     lwip_free
 #endif /* MEM_LIBC_MALLOC */
 
-#if defined __x86_64__ && !defined DEBUG_BUILD
+#if defined __x86_64__ && !defined DEBUG_BUILD && !defined NOAVXMEMCPY
 #include <rte_memcpy.h>
 #warning "Using rte_memcpy for lwIP"
 #define MEMCPY(dst, src, len)  rte_memcpy((dst), (src), (len))

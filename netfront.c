@@ -19,7 +19,7 @@
 #include <mini-os/semaphore.h>
 #include <xen/io/netif.h>
 
-#if defined(__x86_64__) && !defined DEBUG_BUILD
+#if defined(__x86_64__) && !defined DEBUG_BUILD && !defined NOAVXMEMCPY
 #include <rte_memcpy.h>
 #define NETIF_MEMCPY(dst, src, len)  rte_memcpy((dst), (src), (len))
 #else
