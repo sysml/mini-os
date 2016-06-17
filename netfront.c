@@ -1014,8 +1014,10 @@ static inline struct netif_tx_request *netfront_make_txreqs_pgnt(struct netfront
 	return tx;
 }
 #else /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
-#define _count_pages(len)						\
-  ((len == 0) ? 0 : (1 + (len / PAGE_SIZE)))
+#define _count_pages(ptr, len)                                         \
+  ((len == 0) ? 0 : (1 +                                               \
+                    (((((uintptr_t)(ptr)) + (len)) >> (PAGE_SHIFT)) -  \
+                     (((uintptr_t)(ptr)) >> (PAGE_SHIFT)))))
 
 static inline unsigned long netfront_count_pbuf_slots(struct netfront_dev *dev, const struct pbuf *p)
 {
@@ -1023,7 +1025,7 @@ static inline unsigned long netfront_count_pbuf_slots(struct netfront_dev *dev, 
 	unsigned long slots = 0;
 
 	for (q = p; q != NULL; q = q->next)
-	  slots += (unsigned long) _count_pages(q->len);
+	  slots += (unsigned long) _count_pages(q->payload, q->len);
 	return slots;
 }
 
@@ -1047,7 +1049,7 @@ static inline struct netif_tx_request *netfront_make_txreqs(struct netfront_dev 
 	/* map pages of pbuf */
 	for (q = p; q != NULL; q = q->next) {
 		left = q->len;
-		q_slots = (int) _count_pages(q->len);
+		q_slots = (int) _count_pages(q->payload, q->len);
 
 		/* grant pages of pbuf */
 		for (s = 0; s < q_slots; ++s) {
