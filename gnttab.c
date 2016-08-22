@@ -76,8 +76,7 @@ gnttab_grant_access(domid_t domid, unsigned long frame, int readonly)
     gnttab_table[ref].frame = frame;
     gnttab_table[ref].domid = domid;
     wmb();
-    readonly *= GTF_readonly;
-    gnttab_table[ref].flags = GTF_permit_access | readonly;
+    gnttab_table[ref].flags = GTF_permit_access | (readonly ? GTF_readonly : 0x0);
 
     return ref;
 }

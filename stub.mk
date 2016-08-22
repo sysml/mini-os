@@ -56,6 +56,7 @@ TOUCH		 = touch
 
 STRIP		 = strip
 OBJCOPY		 = objcopy
+NM		 = nm
 
 CXXCOMPILE	 = $(CXX) $(CDEFINES) $(CINCLUDES) $(CPPFLAGS) $(CXXFLAGS)
 CXXLD		 = $(CXX)
@@ -131,6 +132,7 @@ CONFIG_SELECT_POLL		?= n
 CONFIG_NETFRONT_PERSISTENT_GRANTS ?= n
 CONFIG_NETFRONT_GSO		?= y
 CONFIG_NETFRONT_WAITFORTX	?= y
+CONFIG_NETFRONT_LWIP_ONLY	?= n
 CONFIG_FBFRONT			?= n
 CONFIG_KBDFRONT			?= n
 CONFIG_CONSFRONT		?= n
@@ -191,6 +193,7 @@ MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT)			+= -DCONFIG_NETFRONT
 MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT_GSO) 		+= -DCONFIG_NETFRONT_GSO
 MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT_PERSISTENT_GRANTS) 	+= -DCONFIG_NETFRONT_PERSISTENT_GRANTS
 MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT_WAITFORTX)		+= -DCONFIG_NETFRONT_WAITFORTX
+MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT_LWIP_ONLY)		+= -DCONFIG_NETFRONT_LWIP_ONLY
 MINIOS_OPT_FLAGS-$(CONFIG_NETMAP)			+= -DCONFIG_NETMAP
 MINIOS_OPT_FLAGS-$(CONFIG_BLKFRONT)			+= -DCONFIG_BLKFRONT
 MINIOS_OPT_FLAGS-$(CONFIG_BLKFRONT_PERSISTENT_GRANTS)	+= -DCONFIG_BLKFRONT_PERSISTENT_GRANTS
@@ -216,6 +219,7 @@ ifeq ($(CONFIG_NETFRONT_POLL),y)
 MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT) += -DCONFIG_NETFRONT_POLL
 MINIOS_OPT_FLAGS-$(CONFIG_NETFRONT) += -DCONFIG_NETFRONT_POLLTIMEOUT=$(CONFIG_NETFRONT_POLLTIMEOUT)
 endif
+MINIOS_OPT_FLAGS-$(CONFIG_NOAVXMEMCPY)		+= -DNOAVXMEMCPY
 
 MINIOS_OBJS			 = $(addprefix $(MINIOS_OBJ_DIR)/,$(notdir $(MINIOS_OBJS0-y)))
 MINIOS_DEPS			 = $(patsubst %.o,%.d,$(MINIOS_OBJS))
@@ -492,8 +496,8 @@ ifeq ($(debug),y)
 CFLAGS			+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls -DDEBUG_BUILD
 CXXFLAGS		+= -g -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls -DDEBUG_BUILD
 else
-CFLAGS			+= -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
-CXXFLAGS		+= -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
+CFLAGS			+= -g -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
+CXXFLAGS		+= -g -O3 -msse4 -fno-omit-frame-pointer -fno-tree-sra -fno-tree-vectorize
 endif
 
 
@@ -556,7 +560,9 @@ $(STUB_APP_IMG).o: $(STUB_APP_IMG)_.o
 
 $(STUB_APP_IMG): $(STUB_APP_IMG).o
 	$(call verbose_cmd,$(LD) $(LDFLAGS) -T $(MINIOS_ARCH_LDS) $@.o -o,'LD ',$@)
+	$(call verbose_cmd,$(NM) -n $@ >,'SYM',$@.syms)
 ifneq ($(debug),y)
+	$(call verbose_cmd,cp $@ , 'CP', $@_nostrip)
 	$(call verbose_cmd,$(STRIP) -s,'STR',$@)
 endif
 
@@ -582,13 +588,50 @@ clean-stub:
 
 distclean-stub:
 	$(call verbose_cmd,$(RM)												\
-		$(STUB_APP).o $(STUB_APP_IMG).o $(STUB_APP_IMG) $(STUB_APP_IMG).gz,	\
+		$(STUB_APP).o $(STUB_APP_IMG).o $(STUB_APP_IMG) $(STUBS_APP_IMG).syms $(STUB_APP_IMG).gz,	\
 		'CLN $(STUB_APP_IMG)')
 
 .PHONY: banner
 banner:
 	@#
 
+################################################################################
+# Tags
+################################################################################
+all_sources_lists = minios.srclist own.srclist xen.srclist newlib.srclist
+minios.srclist: ROOT_SRC = $(MINIOS_ROOT)
+xen.srclist: ROOT_SRC = $(XEN_ROOT)
+newlib.srclist: ROOT_SRC = $(NEWLIB_ROOT)
+own.srclist: ROOT_SRC = .
+%.srclist:
+	-$(call verbose_cmd, \
+		find -L $(ROOT_SRC) \
+		\( -iname '*.c' -o -iname '*.cpp' -o -iname '*.h' -o -iname '*.hpp' \) \
+		-exec readlink -f '{}' \; > $@, \
+		'LST $(ROOT_SRC)')
+
+src.list: $(all_sources_lists)
+	$(call verbose_cmd, \
+		cat $(all_sources_lists) | sort -u > $@, \
+		'GEN $@')
+
+.PHONY: cscope
+cscope: src.list
+	$(call verbose_cmd, \
+		cscope -c -b -k -i src.list -f cscope.out, \
+		"GEN scope.out")
+
+.PHONY: TAGS
+TAGS: src.list
+	$(call verbose_cmd, \
+		rm -f TAGS; xargs -a src.list etags -a, \
+		'GEN TAGS')
+
+.PHONY: clean-tags
+clean-tags:
+	$(call verbose_cmd, $(RM) \
+		src.list $(all_sources_lists) cscope.out TAGS, \
+		'CLN tags')
 
 ################################################################################
 # Others
@@ -610,5 +653,5 @@ $(BUILD_DIRS):
 
 .PHONY: clean
 clean: clean-minios clean-lwip clean-stub
-distclean: distclean-minios distclean-lwip distclean-stub
+distclean: distclean-minios distclean-lwip distclean-stub clean-tags
 	$(call verbose_cmd,$(RMDIR),'CLN',$(STUBDOM_BUILD_DIR))

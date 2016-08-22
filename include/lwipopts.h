@@ -9,6 +9,8 @@
 #ifndef __LWIP_LWIPOPTS_H__
 #define __LWIP_LWIPOPTS_H__
 
+#include <inttypes.h>
+
 /*
  * General options/System settings
  */
@@ -74,7 +76,7 @@ void lwip_free(void *ptr);
 #define mem_free     lwip_free
 #endif /* MEM_LIBC_MALLOC */
 
-#if defined __x86_64__ && !defined DEBUG_BUILD
+#if defined __x86_64__ && !defined DEBUG_BUILD && !defined NOAVXMEMCPY
 #include <rte_memcpy.h>
 #warning "Using rte_memcpy for lwIP"
 #define MEMCPY(dst, src, len)  rte_memcpy((dst), (src), (len))
@@ -165,8 +167,14 @@ void lwip_free(void *ptr);
 
 #ifdef CONFIG_NETFRONT_GSO
 #define TCP_GSO 1
-#define TCP_GSO_MAX_SEGS 15
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 #define TCP_GSO_SEG_LEN 65535
+#else
+#include <xen/io/netif.h>
+#define TCP_SEG_LIMIT_PBUF_CLEN 1
+#define TCP_SEG_MAX_PBUF_CLEN ((XEN_NETIF_NR_SLOTS_MIN / 2) - 1)
+#define TCP_GSO_SEG_LEN (TCP_SEG_MAX_PBUF_CLEN * PAGE_SIZE)
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
 
 /*
  * Allow a pbuf to hold up as much as possible in a single pbuf to avoid
@@ -203,6 +211,9 @@ void lwip_free(void *ptr);
  */
 /* PBUF pools */
 #define PBUF_POOL_SIZE ((TCP_WND + TCP_MSS - 1) / TCP_MSS)
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+#define LWIP_SUPPORT_CUSTOM_PBUF 1
+#endif
 #define MEMP_NUM_PBUF ((MEMP_NUM_TCP_PCB * (TCP_SND_QUEUELEN)) / 2)
 
 /*
