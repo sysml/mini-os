@@ -455,6 +455,7 @@ CDEFINES		+= -DHAVE_LIBC
 CDEFINES		+= -D__XEN_INTERFACE_VERSION__=$(XEN_INTERFACE_VERSION)
 
 CINCLUDES		+= -isystem $(XEN_ROOT)/tools/xenstore
+CINCLUDES		+= -isystem $(XEN_ROOT)/tools/xenstore/include
 CINCLUDES		+= -isystem $(NEWLIB_ROOT)/include
 
 ASDEFINES		+= -D__ASSEMBLY__
