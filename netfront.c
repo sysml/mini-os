@@ -1121,7 +1121,11 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 	/* Counts how many slots we require for this buf */
 	slots = netfront_count_pbuf_slots(dev, p);
 #ifdef CONFIG_NETFRONT_GSO
+#if TCP_GSO /* GSO flag is only available if lwIP is built with GSO support */
 	sego = (p->flags & PBUF_FLAG_GSO) ? 1 : 0;
+#else
+	sego = 0;
+#endif
 	/* GSO requires checksum offloading set */
 	BUG_ON(sego && !(co_type & (XEN_NETIF_GSO_TYPE_TCPV4 | XEN_NETIF_GSO_TYPE_TCPV6)));
 #endif /* CONFIG_NETFRONT_GSO */
@@ -1168,7 +1172,7 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 	/* Set extras if packet is GSO kind */
 	first_tx = netfront_get_page(dev);
 	ASSERT(first_tx != NULL);
-#ifdef CONFIG_NETFRONT_GSO
+#if defined CONFIG_NETFRONT_GSO && TCP_GSO
 	if (sego) {
 		gso = (struct netif_extra_info *) RING_GET_REQUEST(&dev->tx, dev->tx.req_prod_pvt++);
 

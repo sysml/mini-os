@@ -165,7 +165,7 @@ void lwip_free(void *ptr);
 #define TCP_SND_BUF (TCP_WND + (2 * TCP_MSS))
 #endif /* LWIP_WND_SCALE */
 
-#ifdef CONFIG_NETFRONT_GSO
+#ifdef CONFIG_LWIP_GSO
 #define TCP_GSO 1
 #ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
 #define TCP_GSO_SEG_LEN 65535
@@ -175,6 +175,13 @@ void lwip_free(void *ptr);
 #define TCP_SEG_MAX_PBUF_CLEN ((XEN_NETIF_NR_SLOTS_MIN / 2) - 1)
 #define TCP_GSO_SEG_LEN (TCP_SEG_MAX_PBUF_CLEN * PAGE_SIZE)
 #endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
+
+#if defined CONFIG_LWIP_PARTIAL_CHECKSUM && !defined CONFIG_NETFRONT_GSO
+#error "CONFIG_LWIP_PARTIAL_CHECKSUM requires CONFIG_NETFRONT_GSO"
+#endif
+#if defined CONFIG_LWIP_GSO && !defined CONFIG_LWIP_PARTIAL_CHECKSUM
+#error "CONFIG_LWIP_GSO requires CONFIG_LWIP_PARTIAL_CHECKSUM"
+#endif
 
 /*
  * Allow a pbuf to hold up as much as possible in a single pbuf to avoid
@@ -225,12 +232,12 @@ void lwip_free(void *ptr);
 #define CHECKSUM_GEN_ICMP6 1
 #define CHECKSUM_GEN_UDP 1
 #define CHECKSUM_GEN_TCP 1
-#ifdef CONFIG_NETFRONT_GSO
+#ifdef CONFIG_LWIP_PARTIAL_CHECKSUM
 #define LWIP_CHECKSUM_PARTIAL 1 /* TSO on Xen requires partial checksumming (for checksum ofloading) */
 #define LWIP_CHECKSUM_ON_COPY 0 /* checksum on copy is not supported when TCO is enabled */
-#else /* CONFIG_NETFRONT_GSO */
+#else /* CONFIG_LWIP_PARTIAL_CHECKSUM */
 #define LWIP_CHECKSUM_ON_COPY 1
-#endif /* CONFIG_NETFRONT_GSO */
+#endif /* CONFIG_LWIP_PARTIAL_CHECKSUM */
 /* Checksum checking is offloaded to the host (lwip-net is a virtual interface)
  * TODO: better solution is when netfront forwards checksum flags to lwIP */
 #define CHECKSUM_CHECK_IP 0

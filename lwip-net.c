@@ -160,11 +160,11 @@ static inline void printp(struct pbuf *p)
 static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 {
     struct netfrontif *nfi = netif->state;
-#if defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX
+#if LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX
     s16_t ip_hdr_offset;
     const struct eth_hdr *ethhdr;
     const struct ip_hdr *iphdr;
-#endif /* defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX */
+#endif /* LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX */
 #ifdef CONFIG_LWIP_BATCHTX
     const struct tcp_hdr *tcphdr;
 #endif /* CONFIG_LWIP_BATCHTX */
@@ -177,7 +177,7 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 			      netif->name[0], netif->name[1],
 			      p->tot_len));
 
-#if defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX
+#if LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX
     /* detect if payload contains a TCP packet */
     /* NOTE: We assume here that all protocol headers are in the first pbuf of a pbuf chain! */
     ip_hdr_offset = SIZEOF_ETH_HDR;
@@ -196,9 +196,9 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
       if (IPH_PROTO(iphdr) != IP_PROTO_TCP) {
 	goto xmit; /* IPv4 but not TCP */
       }
-#ifdef CONFIG_NETFRONT_GSO
+#if LWIP_CHECKSUM_PARTIAL
       tso = XEN_NETIF_GSO_TYPE_TCPV4; /* TCPv4 segmentation and checksum offloading */
-#endif /* CONFIG_NETFRONT_GSO */
+#endif /* LWIP_CHECKSUM_PARTIAL */
 #ifdef CONFIG_LWIP_BATCHTX
       /* push only when FIN, RST, PSH, or URG flag is set */
       tcphdr = (struct tcp_hdr *)((uintptr_t) p->payload + ip_hdr_offset + (IPH_HL(iphdr) * 4));
@@ -210,9 +210,9 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
     case PP_HTONS(ETHTYPE_IPV6):
       if (IP6H_NEXTH((struct ip6_hdr *)((uintptr_t) p->payload + ip_hdr_offset)) != IP6_NEXTH_TCP)
 	goto xmit; /* IPv6 but not TCP */
-#ifdef CONFIG_NETFRONT_GSO
+#if LWIP_CHECKSUM_PARTIAL
       tso = XEN_NETIF_GSO_TYPE_TCPV6; /* TCPv6 segmentation and checksum offloading */
-#endif /* CONFIG_NETFRONT_GSO */
+#endif /* LWIP_CHECKSUM_PARTIAL */
 #ifdef CONFIG_LWIP_BATCHTX
       /* push only when FIN, RST, PSH, or URG flag is set */
       #error "TSOv6 is not yet supported. Please add it"
@@ -225,7 +225,7 @@ static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
     default:
       break; /* non-IP packet */
     }
-#endif /* defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX */
+#endif /* LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX */
 
  xmit:
 #if ETH_PAD_SIZE
