@@ -217,11 +217,15 @@ void lwip_free(void *ptr);
  * Pool options
  */
 /* PBUF pools */
+#ifndef PBUF_POOL_SIZE
 #define PBUF_POOL_SIZE ((TCP_WND + TCP_MSS - 1) / TCP_MSS)
+#endif
 #ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
 #define LWIP_SUPPORT_CUSTOM_PBUF 1
 #endif
+#ifndef MEMP_NUM_PBUF
 #define MEMP_NUM_PBUF ((MEMP_NUM_TCP_PCB * (TCP_SND_QUEUELEN)) / 2)
+#endif
 
 /*
  * Checksum options
