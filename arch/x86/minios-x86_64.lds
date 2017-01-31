@@ -6,7 +6,7 @@ SECTIONS
   . = 0x0;
   _text = .;			/* Text and read-only data */
   .text : {
-	*(.text)
+	*(.text) *(.text.*)
 	*(.gnu.warning)
 	} = 0x9090
 
