@@ -45,13 +45,14 @@
 #include <xen/features.h>
 #include <xen/version.h>
 
-#ifdef CONFIG_XENBUS
 static unsigned int do_shutdown = 0;
+
+#if defined(CONFIG_XENBUS) || defined(CONFIG_NOXS)
 static unsigned int shutdown_reason;
 static DECLARE_WAIT_QUEUE_HEAD(shutdown_queue);
 #endif
 
-#ifdef CONFIG_XENBUS
+#if 0 /* TODO CONFIG_XENBUS */
 void test_xenbus(void);
 
 static void xenbus_tester(void *p)
@@ -65,8 +66,7 @@ static void periodic_thread(void *p)
 {
     struct timeval tv;
     printk("Periodic thread started.\n");
-    for(;;)
-    {
+    while (!do_shutdown) {
         gettimeofday(&tv, NULL);
         printk("T(s=%ld us=%ld)\n", tv.tv_sec, tv.tv_usec);
         msleep(1000);
@@ -201,6 +201,7 @@ static void blk_write_sector(uint64_t sector)
 static void blkfront_thread(void *p)
 {
     time_t lasttime = 0;
+    DEFINE_WAIT(w);
 
     blk_dev = init_blkfront(NULL, &blk_info);
     if (!blk_dev) {
@@ -229,13 +230,28 @@ static void blkfront_thread(void *p)
     while (!do_shutdown) {
         uint64_t sector = rand() % blk_info.sectors;
         struct timeval tv;
+        uint64_t old_size = blk_size_read;
+        uint64_t *pnew_size = &blk_size_read;
 #ifdef BLKTEST_WRITE
-        if (blk_info.mode == O_RDWR)
+        if (blk_info.mode == O_RDWR) {
+            old_size = blk_size_write;
+            pnew_size = &blk_size_write;
+
             blk_write_sector(sector);
+        }
         else
 #endif
             blk_read_sector(sector);
-        blkfront_aio_poll(blk_dev);
+
+        while (1) {
+            blkfront_aio_poll(blk_dev);
+            if (!(*pnew_size == old_size))
+                break;
+            add_waiter(w, blkfront_queue);
+            schedule();
+        }
+        remove_waiter(w, blkfront_queue);
+
         gettimeofday(&tv, NULL);
         if (tv.tv_sec > lasttime + 10) {
             printk("%llu read, %llu write\n", blk_size_read, blk_size_write);
@@ -507,16 +523,19 @@ void shutdown_frontends(void)
 #endif
 }
 
-#ifdef CONFIG_XENBUS
-void app_shutdown(unsigned reason)
+#if defined(CONFIG_XENBUS) || defined(CONFIG_NOXS)
+void test_shutdown(unsigned reason)
 {
     shutdown_reason = reason;
     wmb();
     do_shutdown = 1;
     wmb();
-    wake_up(&shutdown_queue);
+    shutdown_frontends();
+    /* wake_up(&shutdown_queue); */
 }
 
+#if 0
+/* We disable the shutdown thread as we already have one. */
 static void shutdown_thread(void *p)
 {
     DEFINE_WAIT(w);
@@ -537,11 +556,12 @@ static void shutdown_thread(void *p)
     HYPERVISOR_shutdown(shutdown_reason);
 }
 #endif
+#endif
 
-int app_main(start_info_t *si)
+int test_main(start_info_t *si)
 {
     printk("Test main: start_info=%p\n", si);
-#ifdef CONFIG_XENBUS
+#if 0 /* TODO CONFIG_XENBUS */
     create_thread("xenbus_tester", xenbus_tester, si);
 #endif
     create_thread("periodic_thread", periodic_thread, si);
@@ -558,7 +578,7 @@ int app_main(start_info_t *si)
 #ifdef CONFIG_PCIFRONT
     create_thread("pcifront", pcifront_thread, si);
 #endif
-#ifdef CONFIG_XENBUS
+#if 0
     create_thread("shutdown", shutdown_thread, si);
 #endif
     return 0;
