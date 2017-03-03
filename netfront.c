@@ -1153,10 +1153,12 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 #else
 		if (!netfront_tx_available(dev, slots)) {
 #endif /* CONFIG_NETFRONT_GSO */
+#ifndef CONFIG_NETFRONT_WAITFORTX_BUSYLOOP
 			add_waiter(w, netfront_txqueue); /* release thread until space is free'd */
 			local_irq_restore(flags);
 			schedule();
 			local_irq_save(flags);
+#endif /* !CONFIG_NETFRONT_WAITFORTX_BUSYLOOP */
 			netfront_tx_buf_gc(dev);
 			goto try_again;
 		}
