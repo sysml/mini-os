@@ -168,6 +168,11 @@ struct netfront_dev {
 #endif
 	void (*netif_rx)(unsigned char* data, int len, void *arg);
 	void *netif_rx_arg;
+
+#ifdef CONFIG_NETFRONT_STATS
+	uint64_t txpkts;
+	uint64_t txbytes;
+#endif
 };
 
 struct netfront_dev_list {
@@ -934,6 +939,10 @@ void netfront_xmit(struct netfront_dev *dev, unsigned char *data, int len)
 	tx->flags |= (NETTXF_data_validated);
 	tx->size = len;
 
+#ifdef CONFIG_NETFRONT_STATS
+	++dev->txpkts;
+	dev->txbytes += len;
+#endif
 	netfront_xmit_notify(dev);
 	dprintk("tx: raw %d\n", len);
 
@@ -1207,6 +1216,10 @@ err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, 
 	if (push)
 		netfront_xmit_push(dev);
 
+#ifdef CONFIG_NETFRONT_STATS
+	++dev->txpkts;
+	dev->txbytes += p->tot_len;
+#endif
 	dprintk("tx: %c%c%c %u bytes (%u slots)\n", sego ? 'S' : '-', co_type ? 'C' : '-', push ? 'P' : '-', p->tot_len, slots);
 	return ERR_OK;
 }
@@ -1689,6 +1702,9 @@ skip:
 	dev->fd = alloc_fd(FTYPE_TAP);
 	files[dev->fd].read = 0;
 #endif
+#ifdef CONFIG_NETFRONT_STATS
+	netfront_reset_txcounters(dev);
+#endif
 	return dev;
 error:
 	free(msg);
@@ -1857,5 +1873,21 @@ void init_rx_buffers(struct netfront_dev *dev)
 int netfront_get_fd(struct netfront_dev *dev)
 {
     return dev->fd;
+}
+#endif
+
+#ifdef CONFIG_NETFRONT_STATS
+void netfront_reset_txcounters(struct netfront_dev *dev)
+{
+	dev->txpkts  = 0;
+	dev->txbytes = 0;
+}
+
+void netfront_get_txcounters(struct netfront_dev *dev, uint64_t *out_txpkts, uint64_t *out_txbytes)
+{
+	if (likely(out_txpkts))
+		*out_txpkts = dev->txpkts;
+	if (likely(out_txbytes))
+		*out_txbytes = dev->txbytes;
 }
 #endif

@@ -54,3 +54,8 @@ void networking_set_addr(struct ip_addr *ipaddr, struct ip_addr *netmask, struct
 #ifdef CONFIG_SELECT_POLL
 int netfront_get_fd(struct netfront_dev *dev);
 #endif
+
+#ifdef CONFIG_NETFRONT_STATS
+void netfront_reset_txcounters(struct netfront_dev *dev);
+void netfront_get_txcounters(struct netfront_dev *dev, uint64_t *out_txpkts, uint64_t *out_txbytes);
+#endif
