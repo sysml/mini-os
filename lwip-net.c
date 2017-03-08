@@ -1,40 +1,37 @@
 /*
  * Mini-OS netfront driver for lwIP
  *
- *   file: lwip-net.c
- *
- *          NEC Europe Ltd. PROPRIETARY INFORMATION
- *
- * This software is supplied under the terms of a license agreement
- * or nondisclosure agreement with NEC Europe Ltd. and may not be
- * copied or disclosed except in accordance with the terms of that
- * agreement. The software and its source code contain valuable trade
- * secrets and confidential information which have to be maintained in
- * confidence.
- * Any unauthorized publication, transfer to third parties or duplication
- * of the object or source code - either totally or in part – is
- * prohibited.
- *
- *      Copyright (c) 2015 NEC Europe Ltd. All Rights Reserved.
- *
  * Authors: Simon Kuenzer <simon.kuenzer@neclab.eu>
  *
- * NEC Europe Ltd. DISCLAIMS ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO IMPLIED WARRANTIES OF MERCHANTABILITY
- * AND FITNESS FOR A PARTICULAR PURPOSE AND THE WARRANTY AGAINST LATENT
- * DEFECTS, WITH RESPECT TO THE PROGRAM AND THE ACCOMPANYING
- * DOCUMENTATION.
  *
- * No Liability For Consequential Damages IN NO EVENT SHALL NEC Europe
- * Ltd., NEC Corporation OR ANY OF ITS SUBSIDIARIES BE LIABLE FOR ANY
- * DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES FOR LOSS
- * OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF INFORMATION, OR
- * OTHER PECUNIARY LOSS AND INDIRECT, CONSEQUENTIAL, INCIDENTAL,
- * ECONOMIC OR PUNITIVE DAMAGES) ARISING OUT OF THE USE OF OR INABILITY
- * TO USE THIS PROGRAM, EVEN IF NEC Europe Ltd. HAS BEEN ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
+ * Copyright (c) 2013-2017, NEC Europe Ltd., NEC Corporation All rights reserved.
  *
- *     THIS HEADER MAY NOT BE EXTRACTED OR MODIFIED IN ANY WAY.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its
+ *    contributors may be used to endorse or promote products derived from
+ *    this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * THIS HEADER MAY NOT BE EXTRACTED OR MODIFIED IN ANY WAY.
  *
  * This file is based on Ethernet Interface skeleton (ethernetif.c)
  * provided by lwIP-1.4.1, copyrights as below.
@@ -84,6 +81,18 @@
 #include "lwip/def.h"
 #include "lwip/mem.h"
 #include "lwip/pbuf.h"
+
+#if defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX
+#include "netif/etharp.h"
+#include "lwip/ip4.h"
+#if IPV6_SUPPORT
+#include "lwip/ip6.h"
+#endif
+#include "lwip/tcp_impl.h"
+#include "lwip/tcp.h"
+#include <xen/io/netif.h>
+#endif /* defined CONFIG_NETFRONT_GSO || defined CONFIG_LWIP_BATCHTX */
+
 #include <lwip/stats.h>
 #include <lwip/snmp.h>
 #include <sys/time.h>
@@ -103,6 +112,36 @@
        __a < __b ? __a : __b; })
 #endif
 
+/*
+static inline void printp(struct pbuf *p)
+{
+  u16_t left = p->tot_len;
+  u16_t offset = 0;
+  unsigned char o;
+  u16_t i = 0;
+
+  while (left) {
+    if (offset == p->len) {
+      p = p->next;
+      offset = 0;
+    }
+
+    if (i && i % 2 == 0)
+      printk(" ");
+    if (i && i % 16 == 0)
+      printk("\n");
+    if (i % 16 == 0)
+      printk(" %04x: ", offset);
+
+    o = *(((typeof(o) *) p->payload) + offset);
+    printk("%02x", (unsigned char) o);
+
+    ++offset; ++i; --left;
+  }
+  printk("\n", o);
+}
+*/
+
 /**
  * This function does the actual transmission of a packet. The packet is
  * contained in the pbuf that is passed to the function. This pbuf
@@ -113,80 +152,95 @@
  * @param p
  *  the packet to send (e.g. IP packet including MAC addresses and type)
  * @return
- *  ERR_OK when the packet could be sent; an err_t value otherwise
+ *  ERR_OK when the packet could be enqueued for sending; an err_t value otherwise
  */
 static inline err_t netfrontif_transmit(struct netif *netif, struct pbuf *p)
 {
     struct netfrontif *nfi = netif->state;
-    struct pbuf *q;
-    unsigned char *cur;
+#if LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX
+    s16_t ip_hdr_offset;
+    const struct eth_hdr *ethhdr;
+    const struct ip_hdr *iphdr;
+#endif /* LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX */
+#ifdef CONFIG_LWIP_BATCHTX
+    const struct tcp_hdr *tcphdr;
+#endif /* CONFIG_LWIP_BATCHTX */
+    int tso = 0;
+    int push = 1;
+    err_t err;
 
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: %c%c: "
 			      "Transmitting %u bytes\n",
 			      netif->name[0], netif->name[1],
 			      p->tot_len));
 
+#if LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX
+    /* detect if payload contains a TCP packet */
+    /* NOTE: We assume here that all protocol headers are in the first pbuf of a pbuf chain! */
+    ip_hdr_offset = SIZEOF_ETH_HDR;
+    ethhdr = (struct eth_hdr *) p->payload;
+#if ETHARP_SUPPORT_VLAN
+    if (type == PP_HTONS(ETHTYPE_VLAN)) {
+      type = ((struct eth_vlan_hdr*)(((uintptr_t)ethhdr) + SIZEOF_ETH_HDR))->tpid;
+      ip_hdr_offset = SIZEOF_ETH_HDR + SIZEOF_VLAN_HDR;
+    }
+#endif /* ETHARP_SUPPORT_VLAN */
+    /* TODO: PPP support? */
+
+    switch (ethhdr->type) {
+    case PP_HTONS(ETHTYPE_IP):
+      iphdr = (struct ip_hdr *)((uintptr_t) p->payload + ip_hdr_offset);
+      if (IPH_PROTO(iphdr) != IP_PROTO_TCP) {
+	goto xmit; /* IPv4 but not TCP */
+      }
+#if LWIP_CHECKSUM_PARTIAL
+      tso = XEN_NETIF_GSO_TYPE_TCPV4; /* TCPv4 segmentation and checksum offloading */
+#endif /* LWIP_CHECKSUM_PARTIAL */
+#ifdef CONFIG_LWIP_BATCHTX
+      /* push only when FIN, RST, PSH, or URG flag is set */
+      tcphdr = (struct tcp_hdr *)((uintptr_t) p->payload + ip_hdr_offset + (IPH_HL(iphdr) * 4));
+      push = (TCPH_FLAGS(tcphdr) & (TCP_FIN | TCP_RST | TCP_PSH | TCP_URG));
+#endif /* CONFIG_LWIP_BATCHTX */
+      break;
+
+#if IPV6_SUPPORT
+    case PP_HTONS(ETHTYPE_IPV6):
+      if (IP6H_NEXTH((struct ip6_hdr *)((uintptr_t) p->payload + ip_hdr_offset)) != IP6_NEXTH_TCP)
+	goto xmit; /* IPv6 but not TCP */
+#if LWIP_CHECKSUM_PARTIAL
+      tso = XEN_NETIF_GSO_TYPE_TCPV6; /* TCPv6 segmentation and checksum offloading */
+#endif /* LWIP_CHECKSUM_PARTIAL */
+#ifdef CONFIG_LWIP_BATCHTX
+      /* push only when FIN, RST, PSH, or URG flag is set */
+      #error "TSOv6 is not yet supported. Please add it"
+      tcphdr = NULL;
+      push = (TCPH_FLAGS(tcphdr) & (TCP_FIN | TCP_RST | TCP_PSH | TCP_URG));
+#endif /* CONFIG_LWIP_BATCHTX */
+      break;
+#endif /* IPV6_SUPPORT */
+
+    default:
+      break; /* non-IP packet */
+    }
+#endif /* LWIP_CHECKSUM_PARTIAL || defined CONFIG_LWIP_BATCHTX */
+
+ xmit:
 #if ETH_PAD_SIZE
     pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
 #endif
-
-    if (!p->next) {
-        /* fast case: no further buffer allocation needed */
-        netfront_xmit(nfi->dev, (unsigned char *) p->payload, p->len);
+    err = netfront_xmit_pbuf(nfi->dev, p, tso, push);
+    if (likely(err == ERR_OK)) {
+      LINK_STATS_INC(link.xmit);
     } else {
-        unsigned char data[p->tot_len];
-
-        for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
-            MEMCPY(cur, q->payload, q->len);
-
-        netfront_xmit(nfi->dev, data, p->tot_len);
+      LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_transmit: transmission failed, dropping packet: %d\n", err));
+      LINK_STATS_INC(link.drop);
     }
 
 #if ETH_PAD_SIZE
     pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
 #endif
 
-    LINK_STATS_INC(link.xmit);
-    return ERR_OK;
-}
-
-/**
- * Allocates a pbuf and copies data into it
- *
- * @param data
- *  the pointer to packet data to be copied into the pbuf
- * @param len
- *  the length of data in bytes
- * @return
- *  NULL when a pbuf could not be allocated; the pbuf otherwise
- */
-static inline struct pbuf *netfrontif_mkpbuf(unsigned char *data, int len)
-{
-    struct pbuf *p, *q;
-    unsigned char *cur;
-
-    p = pbuf_alloc(PBUF_RAW, len + ETH_PAD_SIZE, PBUF_POOL);
-    if (unlikely(!p))
-        return NULL;
-
-#if ETH_PAD_SIZE
-    pbuf_header(p, -ETH_PAD_SIZE); /* drop the padding word */
-#endif
-
-    if (likely(!p->next)) {
-        /* fast path */
-        MEMCPY(p->payload, data, len);
-    } else {
-        /* pbuf chain */
-        for(q = p, cur = data; q != NULL; cur += q->len, q = q->next)
-            MEMCPY(q->payload, cur, q->len);
-    }
-
-#if ETH_PAD_SIZE
-    pbuf_header(p, ETH_PAD_SIZE); /* reclaim the padding word */
-#endif
-
-    return p;
+    return err;
 }
 
 /**
@@ -212,16 +266,16 @@ static inline void netfrontif_input(struct pbuf *p, struct netif *netif)
 			      p->tot_len));
 
     ethhdr = p->payload;
-    switch (htons(ethhdr->type)) {
+    switch (ethhdr->type) {
     /* IP or ARP packet? */
-    case ETHTYPE_IP:
+    case PP_HTONS(ETHTYPE_IP):
 #if IPV6_SUPPORT
-    case ETHTYPE_IPV6:
+    case PP_HTONS(ETHTYPE_IPV6):
 #endif
-    case ETHTYPE_ARP:
+    case PP_HTONS(ETHTYPE_ARP):
 #if PPPOE_SUPPORT
-    case ETHTYPE_PPPOEDISC:
-    case ETHTYPE_PPPOE:
+    case PP_HTONS(ETHTYPE_PPPOEDISC):
+    case PP_HTONS(ETHTYPE_PPPOE):
 #endif
     /* packet will be sent to lwIP stack for processing */
     /* Note: On threaded configuration packet buffer will be enqueued on
@@ -254,22 +308,18 @@ static inline void netfrontif_input(struct pbuf *p, struct netif *netif)
 }
 
 /**
- * Callback to netfront that pushed a received packet to lwIP.
+ * Callback to netfront that pushed a received pbuf to lwIP.
  * Is is called by netfrontif_poll() for each received packet.
  *
- * @param data
+ * @param p
  *  the pointer to received packet data
- * @param len
- *  the length of data in bytes
  * @param argp
  *  pointer to netif
  */
-static void netfrontif_rx_handler(unsigned char *data, int len, void *argp)
+static void netfrontif_rx_handler(struct pbuf *p, void *argp)
 {
     struct netif *netif = argp;
-    struct pbuf *p;
 
-    p = netfrontif_mkpbuf(data, len);
     if (unlikely(!p)) {
         LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_rx_handler: %c%c: ERROR: "
 				  "Packet dropped: Out of pbufs\n",
@@ -409,7 +459,8 @@ err_t netfrontif_init(struct netif *netif)
 	    goto err_free_nfi;
 	}
     }
-    netfront_set_rx_handler(nfi->dev, netfrontif_rx_handler, netif);
+
+    netfront_set_rx_pbuf_handler(nfi->dev, netfrontif_rx_handler, netif);
 
     /* Interface identifier */
     netif->name[0] = NETFRONTIF_NPREFIX;

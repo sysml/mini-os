@@ -9,6 +9,8 @@
 #ifndef __LWIP_LWIPOPTS_H__
 #define __LWIP_LWIPOPTS_H__
 
+#include <inttypes.h>
+
 /*
  * General options/System settings
  */
@@ -50,15 +52,18 @@
    */
   #define MEM_LIBC_MALLOC 1 /* enable heap */
   #define MEMP_MEM_MALLOC 0 /* pool allocations still via pool */
-#endif
+#endif /* CONFIG_LWIP_HEAP_ONLY / CONFIG_LWIP_POOLS_ONLY */
 
 #define MEMP_SEPARATE_POOLS 1 /* for each pool use a separate aray in data segment */
+#ifdef CONFIG_LWIP_POOLS_ON_HEAP
+#define MEMP_POOLS_ON_HEAP 1 /* allocate pools on system's heap */
+#endif
 #define MEM_ALIGNMENT 4
 
 #if MEM_USE_POOLS
 /* requires lwippools.h */
 #define MEMP_USE_CUSTOM_POOLS 0
-#endif
+#endif /* MEM_USE_POOLS */
 
 #if MEM_LIBC_MALLOC
 #include <stddef.h> /* size_t */
@@ -69,9 +74,14 @@ void lwip_free(void *ptr);
 #define mem_malloc   lwip_malloc
 #define mem_calloc   lwip_calloc
 #define mem_free     lwip_free
-#endif
+#endif /* MEM_LIBC_MALLOC */
 
+#if defined __x86_64__ && !defined DEBUG_BUILD && !defined NOAVXMEMCPY
+#include <rte_memcpy.h>
+#define MEMCPY(dst, src, len)  rte_memcpy((dst), (src), (len))
+#else
 #define MEMCPY(dst, src, len)  memcpy((dst), (src), (len))
+#endif /* defined __x86_64__ && !defined DEBUG_BUILD */
 
 /*
  * Feature selection
@@ -82,30 +92,16 @@ void lwip_free(void *ptr);
 #define LWIP_SOCKET 1 /* required by lib/sys.c */
 #define LWIP_IGMP 1
 #define LWIP_DNS 1
+
 #ifndef CONFIG_LWIP_MINIMAL
 #define LWIP_SNMP 1
 #define LWIP_PPP 1
 #define LWIP_SLIP 1
 #define LWIP_AUTOIP 1
-#endif
+#endif /* CONFIG_LWIP_MINIMAL */
 
 /* disable BSD-style socket */
 #define LWIP_COMPAT_SOCKETS 0
-
-/*
- * Pool options
- */
-/* PBUF pools */
-#if !defined CONFIG_LWIP_PBUF_NUM_RX || !CONFIG_LWIP_PBUF_NUM_RX
-#undef CONFIG_LWIP_PBUF_NUM_RX
-#define CONFIG_LWIP_PBUF_NUM_RX 256
-#endif
-#if !defined CONFIG_LWIP_PBUF_NUM_REF || !CONFIG_LWIP_PBUF_NUM_REF
-#undef CONFIG_LWIP_PBUF_NUM_REF
-#define CONFIG_LWIP_PBUF_NUM_REF (MEMP_NUM_TCP_PCB * 24)
-#endif
-#define PBUF_POOL_SIZE CONFIG_LWIP_PBUF_NUM_RX
-#define MEMP_NUM_PBUF CONFIG_LWIP_PBUF_NUM_REF
 
 /*
  * Thread options
@@ -114,7 +110,7 @@ void lwip_free(void *ptr);
 #define TCPIP_THREAD_NAME "lwIP"
 #define TCPIP_MBOX_SIZE 256
 #define MEMP_NUM_TCPIP_MSG_INPKT 256
-#endif
+#endif /* CONFIG_LWIP_NOTHREADS */
 
 /*
  * ARP options
@@ -130,34 +126,79 @@ void lwip_free(void *ptr);
 /*
  * TCP options
  */
-#if !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON
+#if !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON || (CONFIG_LWIP_NUM_TCPCON < 1)
 #undef CONFIG_LWIP_NUM_TCPCON
-#define CONFIG_LWIP_NUM_TCPCON 512
-#endif
+#define CONFIG_LWIP_NUM_TCPCON 128
+#endif /* !defined CONFIG_LWIP_NUM_TCPCON || !CONFIG_LWIP_NUM_TCPCON */
 
+#define TCP_CALCULATE_EFF_SEND_MSS 1
+#define IP_FRAG 0
 #define TCP_MSS 1460
-#define TCP_WND 65535 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
+
 #if defined CONFIG_LWIP_WND_SCALE
 #define LWIP_WND_SCALE 1
 #else
 #define LWIP_WND_SCALE 0
-#endif
+#endif /* CONFIG_LWIP_WND_SCALE */
+
 #if LWIP_WND_SCALE
+/*
+ * Maximum window and scaling factor
+ * Optimal settings for RX performance are:
+ * 	TCP_WND		262143
+ * 	TCP_RCV_SCALE	5
+ */
 #if defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1
 #define TCP_RCV_SCALE CONFIG_LWIP_WND_SCALE_FACTOR /* scaling factor 0..14 */
 #else
-#define TCP_RCV_SCALE 3
-#endif
-#define TCP_SND_BUF ((TCP_WND << TCP_RCV_SCALE) * 2)
+#define TCP_RCV_SCALE 4
+#endif /* defined CONFIG_LWIP_WND_SCALE_FACTOR && CONFIG_LWIP_WND_SCALE_FACTOR >= 1 */
+#define TCP_WND 262142
+#define TCP_SND_BUF ( 1024 * 1024 )
+
+#else /* LWIP_WND_SCALE */
+/*
+ * Options when no window scaling  is enabled
+ */
+#define TCP_WND 32766 /* Ideally, TCP_WND should be link bandwidth multiplied by rtt */
+#define TCP_SND_BUF (TCP_WND + (2 * TCP_MSS))
+#endif /* LWIP_WND_SCALE */
+
+#ifdef CONFIG_LWIP_GSO
+#define TCP_GSO 1
+#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
+#define TCP_GSO_SEG_LEN 65535
 #else
-#define TCP_SND_BUF (TCP_WND * 2)
+#include <xen/io/netif.h>
+#define TCP_SEG_LIMIT_PBUF_CLEN 1
+#define TCP_SEG_MAX_PBUF_CLEN ((XEN_NETIF_NR_SLOTS_MIN / 2) - 1)
+#define TCP_GSO_SEG_LEN (TCP_SEG_MAX_PBUF_CLEN * PAGE_SIZE)
+#endif /* CONFIG_NETFRONT_PERSISTENT_GRANTS */
+
+#if defined CONFIG_LWIP_PARTIAL_CHECKSUM && !defined CONFIG_NETFRONT_GSO
+#error "CONFIG_LWIP_PARTIAL_CHECKSUM requires CONFIG_NETFRONT_GSO"
 #endif
-#define TCP_SND_QUEUELEN (4 * TCP_SND_BUF / TCP_MSS)
-#define TCP_QUEUE_OOSEQ 1
-#define MEMP_NUM_TCP_SEG CONFIG_LWIP_PBUF_NUM_REF
+#if defined CONFIG_LWIP_GSO && !defined CONFIG_LWIP_PARTIAL_CHECKSUM
+#error "CONFIG_LWIP_GSO requires CONFIG_LWIP_PARTIAL_CHECKSUM"
+#endif
+
+/*
+ * Allow a pbuf to hold up as much as possible in a single pbuf to avoid
+ * long chains.
+ * Use this carefully as it might lead to tcp crashes with the maximum
+ * number:
+ *
+ * TCP_OVERSIZE 65481
+ */
+#undef TCP_OVERSIZE
+#define TCP_OVERSIZE 0
+#endif /* CONFIG_NETFRONT_GSO */
+
+#define TCP_SND_QUEUELEN (2 * (TCP_SND_BUF) / (TCP_MSS))
+#define TCP_QUEUE_OOSEQ 4
+#define MEMP_NUM_TCP_SEG (MEMP_NUM_TCP_PCB * ((TCP_SND_QUEUELEN) / 5))
 #define MEMP_NUM_FRAG_PBUF 32
 #define LWIP_TCP_TIMESTAMPS 0
-#define TCP_OVERSIZE TCP_MSS
 #define LWIP_TCP_KEEPALIVE 1
 
 #define MEMP_NUM_TCP_PCB CONFIG_LWIP_NUM_TCPCON /* max num of sim. TCP connections */
@@ -170,28 +211,44 @@ void lwip_free(void *ptr);
 #define DNS_TABLE_SIZE 32
 #define DNS_LOCAL_HOST_LIST 1
 #define DNS_LOCAL_HOSTLIST_IS_DYNAMIC 1
-//#define DNS_LOCAL_HOSTLIST_INIT {{"host1", 0x123}, {"host2", 0x234}}
+
+/*
+ * Pool options
+ */
+/* PBUF pools */
+#ifndef PBUF_POOL_SIZE
+#define PBUF_POOL_SIZE ((TCP_WND + TCP_MSS - 1) / TCP_MSS)
+#endif
+#ifndef CONFIG_NETFRONT_PERSISTENT_GRANTS
+#define LWIP_SUPPORT_CUSTOM_PBUF 1
+#endif
+#ifndef MEMP_NUM_PBUF
+#define MEMP_NUM_PBUF ((MEMP_NUM_TCP_PCB * (TCP_SND_QUEUELEN)) / 2)
+#endif
 
 /*
  * Checksum options
  */
-#ifdef CONFIG_LWIP_CHECKSUM_NOGEN
-#define CHECKSUM_GEN_IP 0
-#define CHECKSUM_GEN_UDP 0
-#define CHECKSUM_GEN_TCP 0
-#define CHECKSUM_GEN_ICMP 0
-#define CHECKSUM_GEN_ICMP6 0
-#else
+#define CHECKSUM_GEN_IP 1
+#define CHECKSUM_GEN_IP6 1
+#define CHECKSUM_GEN_ICMP 1
+#define CHECKSUM_GEN_ICMP6 1
+#define CHECKSUM_GEN_UDP 1
+#define CHECKSUM_GEN_TCP 1
+#ifdef CONFIG_LWIP_PARTIAL_CHECKSUM
+#define LWIP_CHECKSUM_PARTIAL 1 /* TSO on Xen requires partial checksumming (for checksum ofloading) */
+#define LWIP_CHECKSUM_ON_COPY 0 /* checksum on copy is not supported when TCO is enabled */
+#else /* CONFIG_LWIP_PARTIAL_CHECKSUM */
 #define LWIP_CHECKSUM_ON_COPY 1
-#endif
-
-#ifdef CONFIG_LWIP_CHECKSUM_NOCHECK
+#endif /* CONFIG_LWIP_PARTIAL_CHECKSUM */
+/* Checksum checking is offloaded to the host (lwip-net is a virtual interface)
+ * TODO: better solution is when netfront forwards checksum flags to lwIP */
 #define CHECKSUM_CHECK_IP 0
 #define CHECKSUM_CHECK_UDP 0
 #define CHECKSUM_CHECK_TCP 0
 #define CHECKSUM_CHECK_ICMP 0
 #define CHECKSUM_CHECK_ICMP6 0
-#endif
+#define CHECKSUM_CHECK_TCP 0
 
 /*
  * Debugging options
@@ -248,6 +305,8 @@ void lwip_free(void *ptr);
 #define TCP_WND_DEBUG LWIP_DBG_ON
 #define TCP_RST_DEBUG LWIP_DBG_ON
 #define TCP_QLEN_DEBUG LWIP_DBG_ON
+//#define TCP_OUTPUT_DEBUG LWIP_DBG_ON
+//#define TCP_INPUT_DEBUG LWIP_DBG_ON
 #if LWIP_CHECKSUM_ON_COPY
 #define TCP_CHECKSUM_ON_COPY_SANITY_CHECK 1
 #endif

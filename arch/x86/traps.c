@@ -497,7 +497,7 @@ void trap_init(void)
             int dpl = 0;
             if (t->address == (unsigned long)overflow)
                 dpl = 3;
-            set_intr_gate(t->vector, t->address, dpl);
+            _set_gate(t->vector, 0xE /* interrupt */, (void *)t->address, dpl, 0);
         }
 
         /* set hvm callback vector */

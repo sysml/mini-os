@@ -212,7 +212,7 @@ void block_domain(s_time_t until)
             HYPERVISOR_set_timer_op(until);
         else {
             struct vcpu_set_singleshot_timer single;
-            int ret;
+            int ret __maybe_unused;
 
             single.timeout_abs_ns = until;
             single.flags = VCPU_SSHOTTMR_future;

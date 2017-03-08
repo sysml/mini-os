@@ -260,7 +260,7 @@ int read(int fd, void *buf, size_t nbytes)
 	case FTYPE_SOCKET:
 	    return lwip_read(files[fd].socket.fd, buf, nbytes);
 #endif
-#ifdef CONFIG_NETFRONT
+#if defined CONFIG_NETFRONT && !defined CONFIG_NETFRONT_LWIP_ONLY
 	case FTYPE_TAP: {
 	    ssize_t ret;
 	    ret = netfront_receive(files[fd].tap.dev, buf, nbytes);
@@ -341,7 +341,7 @@ int write(int fd, const void *buf, size_t nbytes)
 	case FTYPE_SOCKET:
 	    return lwip_write(files[fd].socket.fd, (void*) buf, nbytes);
 #endif
-#ifdef CONFIG_NETFRONT
+#if defined CONFIG_NETFRONT && !defined CONFIG_NETFRONT_LWIP_ONLY
 	case FTYPE_TAP:
 	    netfront_xmit(files[fd].tap.dev, (void*) buf, nbytes);
 	    return nbytes;
@@ -1384,7 +1384,10 @@ void *mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset
     else if (files[fd].type == FTYPE_MEM) {
         unsigned long first_mfn = offset >> PAGE_SHIFT;
         return map_frames_ex(&first_mfn, n, 0, 1, 1, DOMID_IO, NULL, _PAGE_PRESENT|_PAGE_RW);
-    } else ASSERT(0);
+    }
+    // error: try to raise an assertion in debug mode, bug out otherwise.
+    ASSERT(0);
+    BUG();
 }
 
 int munmap(void *start, size_t length)

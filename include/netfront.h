@@ -3,17 +3,32 @@
 #include <lwip/netif.h>
 #include <lwip/netif/etharp.h>
 #endif
+
+#if defined CONFIG_NETFRONT_LWIP_ONLY && !defined HAVE_LWIP
+#error "netfront: Cannot build netfront purely for lwIP without having lwIP"
+#endif
+
 struct netfront_dev;
-void network_rx(struct netfront_dev *dev);
+void netfront_rx(struct netfront_dev *dev);
+#define network_rx(dev) netfront_rx(dev);
+#ifndef CONFIG_NETFRONT_LWIP_ONLY
 void netfront_set_rx_handler(struct netfront_dev *dev, void (*thenetif_rx)(unsigned char* data, int len, void *arg), void *arg);
+void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len);
+#endif
 struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned char *data, int len, void *arg), unsigned char rawmac[6], char **ip);
-void netfront_xmit(struct netfront_dev *dev, unsigned char* data,int len);
+#ifdef HAVE_LWIP
+void netfront_set_rx_pbuf_handler(struct netfront_dev *dev, void (*thenetif_rx)(struct pbuf *p, void *arg), void *arg);
+err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, int push);
+void netfront_xmit_push(struct netfront_dev *dev);
+#endif
 void shutdown_netfront(struct netfront_dev *dev);
 void suspend_netfront(void);
 void resume_netfront(void);
 #ifdef HAVE_LIBC
 int netfront_tap_open(char *nodename);
+#ifndef CONFIG_NETFRONT_LWIP_ONLY
 ssize_t netfront_receive(struct netfront_dev *dev, unsigned char *data, size_t len);
+#endif
 #endif
 
 extern struct wait_queue_head netfront_queue;
@@ -38,4 +53,9 @@ void networking_set_addr(struct ip_addr *ipaddr, struct ip_addr *netmask, struct
 
 #ifdef CONFIG_SELECT_POLL
 int netfront_get_fd(struct netfront_dev *dev);
+#endif
+
+#ifdef CONFIG_NETFRONT_STATS
+void netfront_reset_txcounters(struct netfront_dev *dev);
+void netfront_get_txcounters(struct netfront_dev *dev, uint64_t *out_txpkts, uint64_t *out_txbytes);
 #endif

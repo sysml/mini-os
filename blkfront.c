@@ -540,6 +540,9 @@ void blkfront_aio_nosched(struct blkfront_aiocb *aiocbp, int write)
     blkfront_aio_submit(dev);
 }
 
+#define blkfront_req_available(dev, n) \
+  (((dev)->ring.req_prod_pvt - (dev)->ring.rsp_cons) < (BLK_RING_SIZE - (n)))
+
 int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write)
 {
     struct blkfront_dev *dev = aiocbp->aio_dev;
@@ -578,8 +581,14 @@ int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write)
     ASSERT(n <= BLKIF_MAX_SEGMENTS_PER_REQUEST);
 #endif
 
-    if (RING_FULL(&dev->ring))
-        return -EBUSY;
+    if (unlikely(!blkfront_req_available(dev, n))) {
+        /* try to free up space by calling aio_poll() */
+        blkfront_aio_poll(dev);
+        if (!blkfront_req_available(dev, n)) {
+            /* we still don't have space, the caller should try again later... */
+            return -EBUSY;
+        }
+    }
     i = dev->ring.req_prod_pvt;
     req = RING_GET_REQUEST(&dev->ring, i);
 
