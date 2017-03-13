@@ -167,14 +167,14 @@ void _exit(int ret)
 {
     int i;
 
+#if defined(HAVE_LWIP) && defined(CONFIG_START_NETWORK) && defined(CONFIG_NETFRONT)
+    stop_networking();
+#endif
     for (i = 0; __DTOR_LIST__[i] != 0; i++)
         ((void((*)(void)))__DTOR_LIST__[i]) ();
     close_all_files();
     __libc_fini_array();
     printk("main returned %d\n", ret);
-#if defined(HAVE_LWIP) && defined(CONFIG_START_NETWORK) && defined(CONFIG_NETFRONT)
-    stop_networking();
-#endif
     kernel_shutdown(ret);
 }
 
