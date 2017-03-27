@@ -41,16 +41,12 @@
 #include <mini-os/kernel.h>
 #include <mini-os/sched.h>
 #include <mini-os/shutdown.h>
-#include <mini-os/xenbus.h>
+#include <mini-os/sysctlfront.h>
 #include <mini-os/xmalloc.h>
 
 
 static start_info_t *start_info_ptr;
-
-static const char *path = "control/shutdown";
-static const char *token = "control/shutdown";
-static xenbus_event_queue events = NULL;
-static int end_shutdown_thread = 0;
+static struct thread* _thread = NULL;
 
 /* This should be overridden by the application we are linked against. */
 __attribute__((weak)) void app_shutdown(unsigned reason)
@@ -60,66 +56,37 @@ __attribute__((weak)) void app_shutdown(unsigned reason)
 
 static void shutdown_thread(void *p)
 {
-    char *shutdown, *err;
-    unsigned int shutdown_reason;
-
-    xenbus_watch_path_token(XBT_NIL, path, token, &events);
+    int shutdown_reason;
 
     for ( ;; ) {
-        xenbus_wait_for_watch(&events);
-        if ((err = xenbus_read(XBT_NIL, path, &shutdown))) {
-            free(err);
-            do_exit();
-        }
 
-        if (end_shutdown_thread)
-            break;
+        sysctlfront_store_init();
+        shutdown_reason = sysctlfront_store_wait();
+        sysctlfront_store_fini();
 
-        if (!strcmp(shutdown, "")) {
-            /* Avoid spurious event on xenbus */
-            /* FIXME: investigate the reason of the spurious event */
-            free(shutdown);
+        if (shutdown_reason < 0)
             continue;
-        } else if (!strcmp(shutdown, "poweroff")) {
-            shutdown_reason = SHUTDOWN_poweroff;
-        } else if (!strcmp(shutdown, "reboot")) {
-            shutdown_reason = SHUTDOWN_reboot;
-        } else if (!strcmp(shutdown, "suspend")) {
-            shutdown_reason = SHUTDOWN_suspend;
-        } else {
-            shutdown_reason = SHUTDOWN_crash;
-        }
-        free(shutdown);
-
-        /* Acknowledge shutdown request */
-        if ((err = xenbus_write(XBT_NIL, path, ""))) {
-            free(err);
-            do_exit();
-        }
 
         app_shutdown(shutdown_reason);
+
+        if (shutdown_reason != SHUTDOWN_suspend)
+            break;
+
+        clear_runnable(_thread);
+        schedule();
     }
 }
 
 static void fini_shutdown(void)
 {
-    char *err;
-
-    end_shutdown_thread = 1;
-    xenbus_release_wait_for_watch(&events);
-    err = xenbus_unwatch_path_token(XBT_NIL, path, token);
-    if (err) {
-        free(err);
-        do_exit();
-    }
+    sysctlfront_store_stop_waiting();
 }
 
 void init_shutdown(start_info_t *si)
 {
     start_info_ptr = si;
 
-    end_shutdown_thread = 0;
-    create_thread("shutdown", shutdown_thread, NULL);
+    _thread = create_thread("shutdown", shutdown_thread, NULL);
 }
 
 void kernel_shutdown(int reason)
@@ -171,8 +138,10 @@ void kernel_suspend(void)
     arch_post_suspend(rc);
     post_suspend(rc);
 
+    wake(_thread);
+
     if (rc) {
-        printk("MiniOS suspend canceled!");
+        printk("MiniOS suspend canceled!\n");
     } else {
         printk("MiniOS resumed from suspend!\n");
     }
