@@ -132,7 +132,11 @@ void start_kernel(start_info_t *si)
     /* Init XenBus */
     init_xenbus();
 
-#ifdef CONFIG_XENBUS
+#ifdef CONFIG_NOXS
+    init_noxs();
+#endif
+
+#if defined(CONFIG_XENBUS) || defined(CONFIG_NOXS)
     /* Init shutdown thread */
     init_shutdown(si);
 #endif
@@ -180,6 +184,10 @@ void pre_suspend(void)
 
     suspend_xenbus();
 
+#ifdef CONFIG_NOXS
+    suspend_noxs();
+#endif
+
     local_irq_disable();
 
     suspend_gnttab();
@@ -200,6 +208,10 @@ void post_suspend(int canceled)
     resume_gnttab();
 
     local_irq_enable();
+
+#ifdef CONFIG_NOXS
+    resume_noxs();
+#endif
 
     resume_xenbus(canceled);
 
