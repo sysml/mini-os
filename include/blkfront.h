@@ -1,6 +1,9 @@
 #include <mini-os/wait.h>
 #include <xen/io/blkif.h>
 #include <mini-os/types.h>
+#ifdef CONFIG_NOXS
+#include <mini-os/noxs.h>
+#endif
 
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
 #define __LOG2_8BIT(x)  (8 - 90/(((x)/4+14)|1) - 2/((x)/2+1))
@@ -50,11 +53,16 @@ struct blkfront_dev {
     struct blk_buffer *pt_pool;
 #endif
 
+#ifdef CONFIG_NOXS
+    noxs_vbd_ctrl_page_t *vbd_page;
+    struct noxs_dev_handle noxs_dev_handle;
+#else
     char *nodename;
     char *backend;
-    struct blkfront_info info;
-
     xenbus_event_queue events;
+#endif
+
+    struct blkfront_info info;
 
 #ifdef HAVE_LIBC
     int fd;
@@ -92,3 +100,16 @@ void blkfront_sync(struct blkfront_dev *dev);
 void shutdown_blkfront(struct blkfront_dev *dev);
 
 extern struct wait_queue_head blkfront_queue;
+
+/*
+ * STORE FUNCTIONS
+ */
+int blkfront_store_preinit(struct blkfront_dev *dev, int id, void *arg);
+int blkfront_store_init(struct blkfront_dev *dev);
+void blkfront_store_fini(struct blkfront_dev *dev);
+
+int blkfront_store_front_data_create(struct blkfront_dev *dev);
+int blkfront_store_front_data_destroy(struct blkfront_dev *dev);
+int blkfront_store_wait_be_connect(struct blkfront_dev *dev);
+int blkfront_store_wait_be_disconnect(struct blkfront_dev *dev);
+int blkfront_store_read_be_info(struct blkfront_dev *dev);

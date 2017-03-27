@@ -193,9 +193,11 @@ MINIOS_OBJS0-$(CONFIG_NETFRONT)		+= netfront.o
 ifeq ($(CONFIG_NOXS),y)
 MINIOS_OBJS0-y += xenbus/sysctlfront_store_noxs.o
 MINIOS_OBJS0-$(CONFIG_NETFRONT) += xenbus/netfront_store_noxs.o
+MINIOS_OBJS0-$(CONFIG_BLKFRONT) += xenbus/blkfront_store_noxs.o
 else
 MINIOS_OBJS0-y += xenbus/sysctlfront_store_xenbus.o
 MINIOS_OBJS0-$(CONFIG_NETFRONT) += xenbus/netfront_store_xenbus.o
+MINIOS_OBJS0-$(CONFIG_BLKFRONT) += xenbus/blkfront_store_xenbus.o
 endif
 MINIOS_OPT_FLAGS-$(CONFIG_START_NETWORK)	+= -DCONFIG_START_NETWORK
 MINIOS_OPT_FLAGS-$(CONFIG_INCLUDE_START_NETWORK)	+= -DCONFIG_INCLUDE_START_NETWORK

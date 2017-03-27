@@ -9,7 +9,6 @@
 #include <mini-os/events.h>
 #include <errno.h>
 #include <xen/io/blkif.h>
-#include <xen/io/protocols.h>
 #include <mini-os/gnttab.h>
 #include <mini-os/xmalloc.h>
 #include <time.h>
@@ -79,43 +78,46 @@ static void free_blkfront(struct blkfront_dev *dev)
 #endif
     mask_evtchn(dev->evtchn);
 
-    free(dev->backend);
-
     gnttab_end_access(dev->ring_ref);
     free_page(dev->ring.sring);
 
     unbind_evtchn(dev->evtchn);
 
+#ifdef CONFIG_NOXS
+    noxs_handle_destroy(&dev->noxs_dev_handle);
+#else
+    free(dev->backend);
     free(dev->nodename);
+#endif
     free(dev);
 }
 
 struct blkfront_dev *init_blkfront(char *_nodename, struct blkfront_info *info)
 {
-    xenbus_transaction_t xbt;
-    char* err;
-    char* message=NULL;
     struct blkif_sring *s;
-    int retry=0;
-    char* msg = NULL;
-    char* c;
     char* nodename = _nodename ? _nodename : "device/vbd/768";
+    int rc;
 
     struct blkfront_dev *dev;
-
-    char path[strlen(nodename) + strlen("/backend-id") + 1];
 
     printk("******************* BLKFRONT for %s **********\n\n\n", nodename);
 
     dev = malloc(sizeof(*dev));
     memset(dev, 0, sizeof(*dev));
-    dev->nodename = strdup(nodename);
 #ifdef HAVE_LIBC
     dev->fd = -1;
 #endif
 
-    snprintf(path, sizeof(path), "%s/backend-id", nodename);
-    dev->dom = xenbus_read_integer(path); 
+    if (blkfront_store_preinit(dev, 768, _nodename) != 0) {
+        free(dev);
+        dev = NULL;
+        goto error;
+    }
+
+    rc = blkfront_store_init(dev);
+    if (rc)
+        goto error;
+
     evtchn_alloc_unbound(dev->dom, blkfront_handler, dev, &dev->evtchn);
 
     s = (struct blkif_sring*) alloc_page();
@@ -141,138 +143,20 @@ struct blkfront_dev *init_blkfront(char *_nodename, struct blkfront_info *info)
 
     dev->ring_ref = gnttab_grant_access(dev->dom,virt_to_mfn(s),0);
 
-    dev->events = NULL;
-
-again:
-    err = xenbus_transaction_start(&xbt);
-    if (err) {
-        printk("starting transaction\n");
-        free(err);
-    }
-
-#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
-    err = xenbus_printf(xbt, nodename, "feature-persistent", "%u", 1);
-    if (err) {
-        message = "writing feature-persistent";
-        goto abort_transaction;
-    }
-#endif
-    err = xenbus_printf(xbt, nodename, "ring-ref","%u",
-                dev->ring_ref);
-    if (err) {
-        message = "writing ring-ref";
-        goto abort_transaction;
-    }
-    err = xenbus_printf(xbt, nodename,
-                "event-channel", "%u", dev->evtchn);
-    if (err) {
-        message = "writing event-channel";
-        goto abort_transaction;
-    }
-    err = xenbus_printf(xbt, nodename,
-                "protocol", "%s", XEN_IO_PROTO_ABI_NATIVE);
-    if (err) {
-        message = "writing protocol";
-        goto abort_transaction;
-    }
-
-    snprintf(path, sizeof(path), "%s/state", nodename);
-    err = xenbus_switch_state(xbt, path, XenbusStateConnected);
-    if (err) {
-        message = "switching state";
-        goto abort_transaction;
-    }
-
-
-    err = xenbus_transaction_end(xbt, 0, &retry);
-    free(err);
-    if (retry) {
-            goto again;
-        printk("completing transaction\n");
-    }
-
-    goto done;
-
-abort_transaction:
-    free(err);
-    err = xenbus_transaction_end(xbt, 1, &retry);
-    printk("Abort transaction %s\n", message);
-    goto error;
-
-done:
-
-    snprintf(path, sizeof(path), "%s/backend", nodename);
-    msg = xenbus_read(XBT_NIL, path, &dev->backend);
-    if (msg) {
-        printk("Error %s when reading the backend path %s\n", msg, path);
+    rc = blkfront_store_front_data_create(dev);
+    if (rc)
         goto error;
-    }
 
-    printk("backend at %s\n", dev->backend);
+    rc = blkfront_store_wait_be_connect(dev);
+    if (rc)
+        goto error;
 
-    dev->handle = strtoul(strrchr(nodename, '/')+1, NULL, 0);
+    rc = blkfront_store_read_be_info(dev);
+    if (rc)
+        goto error;
 
-    {
-        XenbusState state;
-        char path[strlen(dev->backend) + strlen("/feature-flush-cache") + 1];
-        snprintf(path, sizeof(path), "%s/mode", dev->backend);
-        msg = xenbus_read(XBT_NIL, path, &c);
-        if (msg) {
-            printk("Error %s when reading the mode\n", msg);
-            goto error;
-        }
-        if (*c == 'w')
-            dev->info.mode = O_RDWR;
-        else
-            dev->info.mode = O_RDONLY;
-        free(c);
+    *info = dev->info;
 
-        snprintf(path, sizeof(path), "%s/state", dev->backend);
-
-        xenbus_watch_path_token(XBT_NIL, path, path, &dev->events);
-
-        msg = NULL;
-        state = xenbus_read_integer(path);
-        while (msg == NULL && state < XenbusStateConnected)
-            msg = xenbus_wait_for_state_change(path, &state, &dev->events);
-        if (msg != NULL || state != XenbusStateConnected) {
-            printk("backend not available, state=%d\n", state);
-            xenbus_unwatch_path_token(XBT_NIL, path, path);
-            goto error;
-        }
-
-        snprintf(path, sizeof(path), "%s/info", dev->backend);
-        dev->info.info = xenbus_read_integer(path);
-
-        snprintf(path, sizeof(path), "%s/sectors", dev->backend);
-        // FIXME: read_integer returns an int, so disk size limited to 1TB for now
-        dev->info.sectors = xenbus_read_integer(path);
-
-        snprintf(path, sizeof(path), "%s/sector-size", dev->backend);
-        dev->info.sector_size = xenbus_read_integer(path);
-
-#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
-        snprintf(path, sizeof(path), "%s/feature-persistent", dev->backend);
-        if (xenbus_read_integer(path) != 1) {
-            printk("backend does not support persistent grants\n");
-            goto error;
-        }
-
-        /* fast copy only usable if devices sector size is multiple of 256 */
-        if (dev->info.sector_size & 0xFF) {
-            printk("unsupported device sector size: %d\n", dev->info.sector_size);
-            goto error;
-        }
-#endif
-
-        snprintf(path, sizeof(path), "%s/feature-barrier", dev->backend);
-        dev->info.barrier = xenbus_read_integer(path);
-
-        snprintf(path, sizeof(path), "%s/feature-flush-cache", dev->backend);
-        dev->info.flush = xenbus_read_integer(path);
-
-        *info = dev->info;
-    }
     unmask_evtchn(dev->evtchn);
 
     printk("%u sectors of %u bytes\n", dev->info.sectors, dev->info.sector_size);
@@ -281,70 +165,21 @@ done:
     return dev;
 
 error:
-    free(msg);
-    free(err);
     free_blkfront(dev);
     return NULL;
 }
 
 void shutdown_blkfront(struct blkfront_dev *dev)
 {
-    char* err = NULL, *err2;
-    XenbusState state;
-
-    char path[strlen(dev->backend) + strlen("/state") + 1];
-    char nodename[strlen(dev->nodename) + strlen("/event-channel") + 1];
+    int rc;
 
     blkfront_sync(dev);
 
-    printk("close blk: backend=%s node=%s\n", dev->backend, dev->nodename);
+    rc = blkfront_store_wait_be_disconnect(dev);
+    rc = blkfront_store_front_data_destroy(dev);
+    blkfront_store_fini(dev);
 
-    snprintf(path, sizeof(path), "%s/state", dev->backend);
-    snprintf(nodename, sizeof(nodename), "%s/state", dev->nodename);
-
-    if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateClosing)) != NULL) {
-        printk("shutdown_blkfront: error changing state to %d: %s\n",
-                XenbusStateClosing, err);
-        goto close;
-    }
-    state = xenbus_read_integer(path);
-    while (err == NULL && state < XenbusStateClosing)
-        err = xenbus_wait_for_state_change(path, &state, &dev->events);
-    free(err);
-
-    if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateClosed)) != NULL) {
-        printk("shutdown_blkfront: error changing state to %d: %s\n",
-                XenbusStateClosed, err);
-        goto close;
-    }
-    state = xenbus_read_integer(path);
-    while (state < XenbusStateClosed) {
-        err = xenbus_wait_for_state_change(path, &state, &dev->events);
-        free(err);
-    }
-
-    if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateInitialising)) != NULL) {
-        printk("shutdown_blkfront: error changing state to %d: %s\n",
-                XenbusStateInitialising, err);
-        goto close;
-    }
-    state = xenbus_read_integer(path);
-    while (err == NULL && (state < XenbusStateInitWait || state >= XenbusStateClosed))
-        err = xenbus_wait_for_state_change(path, &state, &dev->events);
-
-close:
-    free(err);
-    err2 = xenbus_unwatch_path_token(XBT_NIL, path, path);
-    free(err2);
-
-    snprintf(nodename, sizeof(nodename), "%s/ring-ref", dev->nodename);
-    err2 = xenbus_rm(XBT_NIL, nodename);
-    free(err2);
-    snprintf(nodename, sizeof(nodename), "%s/event-channel", dev->nodename);
-    err2 = xenbus_rm(XBT_NIL, nodename);
-    free(err2);
-
-    if (!err)
+    if (!rc)
         free_blkfront(dev);
 }
 
@@ -829,7 +664,9 @@ int blkfront_open(struct blkfront_dev *dev)
        return dev->fd;
     }
     dev->fd = alloc_fd(FTYPE_BLK);
+#ifndef CONFIG_NOXS /*TODO create nodename wrapper*/
     printk("blk_open(%s) -> %d\n", dev->nodename, dev->fd);
+#endif
     files[dev->fd].blk.dev = dev;
     files[dev->fd].blk.offset = 0;
     return dev->fd;
