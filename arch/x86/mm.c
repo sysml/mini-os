@@ -295,6 +295,19 @@ static void build_pagetable(unsigned long *start_pfn, unsigned long *max_pfn)
  * Mark portion of the address space read only.
  */
 extern struct shared_info shared_info;
+#ifdef CONFIG_NOXS
+extern struct noxs_dev_page_t device_page;
+#endif
+
+static inline int is_start_of_regular_page(unsigned long address)
+{
+    return (address != (unsigned long) &shared_info
+#ifdef CONFIG_NOXS
+         && address != (unsigned long) &device_page
+#endif
+           );
+}
+
 static void set_readonly(void *text, void *etext)
 {
     unsigned long start_address =
@@ -331,7 +344,7 @@ static void set_readonly(void *text, void *etext)
 
         offset = l1_table_offset(start_address);
 
-        if ( start_address != (unsigned long)&shared_info )
+        if ( is_start_of_regular_page(start_address) )
         {
             if (!xen_feature(XENFEAT_auto_translated_physmap)) {
                 mmu_updates[count].ptr = 

@@ -338,6 +338,15 @@ HYPERVISOR_hvm_op(int op, void *arg)
     return _hypercall2(unsigned long, hvm_op, op, arg);
 }
 
+#ifdef CONFIG_NOXS
+static inline int
+HYPERVISOR_devctl(
+        unsigned long op)
+{
+	return _hypercall1(unsigned long, devctl, op);
+}
+#endif
+
 #endif /* __HYPERCALL_X86_64_H__ */
 
 /*

@@ -16,6 +16,9 @@
 
 #define ENTRY(X) .globl X ; X :
 .globl _start, shared_info, hypercall_page
+#ifdef CONFIG_NOXS
+.globl device_page
+#endif
 
 
 _start:
@@ -36,6 +39,11 @@ shared_info:
 
 hypercall_page:
         .org 0x3000
+
+#ifdef CONFIG_NOXS
+device_page:
+        .org 0x4000
+#endif
 
 
 #define XEN_GET_VCPU_INFO(reg)	movq HYPERVISOR_shared_info,reg

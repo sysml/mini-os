@@ -28,12 +28,21 @@
 
 #include <mini-os/os.h>
 #include <mini-os/lib.h> /* for printk, memcpy */
+#ifdef CONFIG_NOXS
+#include <xen/devctl.h>
+#endif
 
 /*
  * Shared page for communicating with the hypervisor.
  * Events flags go here, for example.
  */
 shared_info_t *HYPERVISOR_shared_info;
+#ifdef CONFIG_NOXS
+/*
+ * Shared page for NoXS device setup.
+ */
+noxs_dev_page_t *HYPERVISOR_device_page;
+#endif
 
 /*
  * This pointer holds a reference to the copy of the start_info struct.
@@ -53,6 +62,9 @@ union start_info_union start_info_union;
 char stack[2*STACK_SIZE];
 
 extern char shared_info[PAGE_SIZE];
+#ifdef CONFIG_NOXS
+extern char device_page[PAGE_SIZE];
+#endif
 
 /* Assembler interface fns in entry.S. */
 void hypervisor_callback(void);
@@ -96,6 +108,46 @@ void unmap_shared_info(void)
     }
 }
 
+#ifdef CONFIG_NOXS
+noxs_dev_page_t *map_device_page(void)
+{
+    int rc;
+    xen_devctl_t devctl;
+
+    devctl.version = XEN_DEVCTL_VERSION;
+    devctl.cmd = XEN_DEVCTL_get;
+    devctl.domain = DOMID_SELF;
+    printk("DOMID_SELF %u\n", devctl.domain);
+
+    if ( (rc = HYPERVISOR_devctl((unsigned long)&devctl)) )
+    {
+        printk("Failed to get noxs information!! rc=%d\n", rc);
+        do_exit();
+    }
+
+    if ( (rc = HYPERVISOR_update_va_mapping((unsigned long)device_page,
+                                            __pte(devctl.u.get.mfn | 5), UVMF_INVLPG)) )
+    {
+        printk("Failed to map device_page!! rc=%d\n", rc);
+        do_exit();
+    }
+
+    return (noxs_dev_page_t *)device_page;
+}
+
+void unmap_device_page(void)
+{
+    int rc;
+
+    if ( (rc = HYPERVISOR_update_va_mapping((unsigned long)HYPERVISOR_device_page,
+            __pte((virt_to_mfn(device_page)<<L1_PAGETABLE_SHIFT)| L1_PROT), UVMF_INVLPG)) )
+    {
+        printk("Failed to unmap device page!! rc=%d\n", rc);
+        do_exit();
+    }
+}
+#endif
+
 static inline void fpu_init(void) {
 	asm volatile("fninit");
 }
@@ -133,6 +185,11 @@ arch_init(start_info_t *si)
 	/* Grab the shared_info pointer and put it in a safe place. */
 	HYPERVISOR_shared_info = map_shared_info(start_info.shared_info);
 
+#ifdef CONFIG_NOXS
+	/* Don't really know why the hell we need a copy of the pointer but just do
+	 * it like the it's done for the shared_info page. */
+	HYPERVISOR_device_page = map_device_page();
+#endif
 	/* Set up event and failsafe callback addresses. */
     if (!xen_feature(XENFEAT_hvm_callback_vector)) {
 #ifdef __i386__
@@ -156,6 +213,10 @@ arch_pre_suspend(void)
 
     unmap_shared_info();
 
+#ifdef CONFIG_NOXS
+    unmap_device_page();/* TODO this is not arch, its common */
+#endif
+
     /* Replace xenstore and console pfns with the correspondent mfns */
     start_info_ptr->store_mfn =
         machine_to_phys_mapping[start_info_ptr->store_mfn];
@@ -175,6 +236,9 @@ arch_post_suspend(int canceled)
     }
 
     HYPERVISOR_shared_info = map_shared_info(start_info_ptr->shared_info);
+#ifdef CONFIG_NOXS
+    HYPERVISOR_device_page = map_device_page();
+#endif
 
     arch_mm_post_suspend(canceled);
 }

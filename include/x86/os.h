@@ -20,6 +20,9 @@
 #include <mini-os/types.h>
 #include <mini-os/hypervisor.h>
 #include <mini-os/kernel.h>
+#ifdef CONFIG_NOXS
+#include <xen/io/noxs.h>
+#endif
 
 #define USED    __attribute__ ((used))
 
@@ -60,6 +63,9 @@
 #ifndef __ASSEMBLY__
 
 extern shared_info_t *HYPERVISOR_shared_info;
+#ifdef CONFIG_NOXS
+extern noxs_dev_page_t *HYPERVISOR_device_page;
+#endif
 
 void trap_init(void);
 void trap_fini(void);
