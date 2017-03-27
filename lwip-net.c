@@ -387,6 +387,9 @@ static void netfrontif_exit(struct netif *netif)
 #ifndef CONFIG_LWIP_NOTHREADS
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_exit: wait for thread shutdown\n"));
     nfi->_thread_exit = 1; /* request exit */
+#ifdef CONFIG_SELECT_POLL
+    wake(nfi->_thread);
+#endif
     while (nfi->_thread_exit)
         schedule();
     LWIP_DEBUGF(NETIF_DEBUG, ("netfrontif_exit: thread was shutdown\n"));
