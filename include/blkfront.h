@@ -38,6 +38,29 @@ struct blkfront_info
     int barrier;
     int flush;
 };
+
+struct blkfront_dev {
+    domid_t dom;
+
+    struct blkif_front_ring ring;
+    grant_ref_t ring_ref;
+    evtchn_port_t evtchn;
+    blkif_vdev_t handle;
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+    struct blk_buffer *pt_pool;
+#endif
+
+    char *nodename;
+    char *backend;
+    struct blkfront_info info;
+
+    xenbus_event_queue events;
+
+#ifdef HAVE_LIBC
+    int fd;
+#endif
+};
+
 struct blkfront_dev *init_blkfront(char *nodename, struct blkfront_info *info);
 #ifdef HAVE_LIBC
 #include <sys/stat.h>
