@@ -37,6 +37,7 @@ CONFIG_FBFRONT ?= y
 CONFIG_KBDFRONT ?= y
 CONFIG_CONSFRONT ?= y
 CONFIG_XENBUS ?= y
+CONFIG_NOXS ?= n
 CONFIG_XC ?=y
 CONFIG_LWIP ?= $(lwip)
 
@@ -54,6 +55,7 @@ flags-$(CONFIG_KBDFRONT) += -DCONFIG_KBDFRONT
 flags-$(CONFIG_FBFRONT) += -DCONFIG_FBFRONT
 flags-$(CONFIG_CONSFRONT) += -DCONFIG_CONSFRONT
 flags-$(CONFIG_XENBUS) += -DCONFIG_XENBUS
+flags-$(CONFIG_NOXS) += -DCONFIG_NOXS
 
 DEF_CFLAGS += $(flags-y)
 
@@ -109,6 +111,7 @@ src-y += lib/xmalloc.c
 src-$(CONFIG_XENBUS) += lib/xs.c
 
 src-$(CONFIG_XENBUS) += xenbus/xenbus.c
+src-$(CONFIG_NOXS) += xenbus/noxs.c
 
 src-y += console/console.c
 src-y += console/xencons_ring.c
