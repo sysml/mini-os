@@ -243,6 +243,7 @@ void init_time(void)
     if (xen_feature(XENFEAT_hvm_callback_vector))
         if (HYPERVISOR_vcpu_op(VCPUOP_stop_periodic_timer, 0 /* cpu */, NULL))
 		    BUG();
+    update_wallclock();
     port = bind_virq(VIRQ_TIMER, &timer_handler, NULL);
     unmask_evtchn(port);
 }
