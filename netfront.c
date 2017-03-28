@@ -1251,9 +1251,14 @@ void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
 
 static void free_netfront(struct netfront_dev *dev)
 {
-	int i;
+	int i, flags;
 	int separate_tx_rx_irq = (dev->tx_evtchn != dev->rx_evtchn);
 
+#ifdef CONFIG_SELECT_POLL
+	local_irq_save(flags);
+	netfront_tx_buf_gc(dev);
+	local_irq_restore(flags);
+#endif
 	free(dev->mac);
 	free(dev->backend);
 
