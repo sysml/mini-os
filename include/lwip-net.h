@@ -61,6 +61,7 @@ struct netfrontif {
 #ifndef CONFIG_LWIP_NOTHREADS
     volatile int _thread_exit;
     char _thread_name[6];
+    struct thread *_thread;
 #endif
     int _state_is_private;
     int _dev_is_private;

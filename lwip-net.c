@@ -461,6 +461,7 @@ err_t netfrontif_init(struct netif *netif)
 				      "Could not init netfront\n"));
 	    goto err_free_nfi;
 	}
+	nfi->dev->netif = nfi;
     }
 
     netfront_set_rx_pbuf_handler(nfi->dev, netfrontif_rx_handler, netif);
@@ -532,7 +533,7 @@ err_t netfrontif_init(struct netif *netif)
   nfi->_thread_name[3] = 'r';
   nfi->_thread_name[4] = 'x';
   nfi->_thread_name[5] = '\0';
-  create_thread(nfi->_thread_name, netfrontif_thread, netif);
+  nfi->_thread = create_thread(nfi->_thread_name, netfrontif_thread, netif);
 #endif /* CONFIG_LWIP_NOTHREADS */
 
     return ERR_OK;
@@ -625,6 +626,7 @@ void start_networking(void)
         goto err_free_netif;
     }
     nfi->dev = dev;
+    dev->netif = nfi;
 
     /* init lwIP */
 #ifdef CONFIG_LWIP_NOTHREADS
@@ -679,6 +681,18 @@ void stop_networking(void)
     shutdown_netfront(dev);
 
     tprintk("Networking stopped\n");
+}
+
+void netfrontif_thread_suspend(struct netfrontif *nfi)
+{
+    if (nfi && nfi->_thread)
+        clear_runnable(nfi->_thread);
+}
+
+void netfrontif_thread_resume(struct netfrontif *nfi)
+{
+    if (nfi && nfi->_thread)
+        set_runnable(nfi->_thread);
 }
 
 #ifdef CONFIG_LWIP_NOTHREADS

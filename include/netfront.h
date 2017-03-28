@@ -24,6 +24,8 @@ void netfront_xmit_push(struct netfront_dev *dev);
 void shutdown_netfront(struct netfront_dev *dev);
 void suspend_netfront(void);
 void resume_netfront(void);
+void netfrontif_thread_suspend(struct netfrontif *nfi);
+void netfrontif_thread_resume(struct netfrontif *nfi);
 #ifdef HAVE_LIBC
 int netfront_tap_open(char *nodename);
 #ifndef CONFIG_NETFRONT_LWIP_ONLY

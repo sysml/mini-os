@@ -1830,16 +1830,28 @@ void suspend_netfront(void)
 {
 	struct netfront_dev_list *list;
 
-	for (list = dev_list; list != NULL; list = list->next)
-		_shutdown_netfront(list->dev);
+	for (list = dev_list; list != NULL; list = list->next) {
+		struct netfront_dev *dev = list->dev;
+
+		if (dev->netif)
+			netfrontif_thread_suspend(dev->netif);
+
+		_shutdown_netfront(dev);
+	}
 }
 
 void resume_netfront(void)
 {
 	struct netfront_dev_list *list;
 
-	for (list = dev_list; list != NULL; list = list->next)
-		_init_netfront(list->dev, NULL, NULL);
+	for (list = dev_list; list != NULL; list = list->next) {
+		struct netfront_dev *dev = list->dev;
+
+		_init_netfront(dev, NULL, NULL);
+
+		if (dev->netif)
+			netfrontif_thread_resume(dev->netif);
+	}
 }
 
 void init_rx_buffers(struct netfront_dev *dev)
