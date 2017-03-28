@@ -7,7 +7,11 @@
  */
 #include <mini-os/os.h>
 #include <mini-os/mm.h>
+#ifdef CONFIG_NOXS
+#include <mini-os/noxs.h>
+#else
 #include <mini-os/xenbus.h>
+#endif
 #include <mini-os/events.h>
 #include <errno.h>
 #include <xen/io/netif.h>
@@ -81,7 +85,11 @@ DECLARE_WAIT_QUEUE_HEAD(netfront_txqueue);
 struct netfront_dev_list {
 	struct netfront_dev *dev;
 	unsigned char rawmac[6];
+#ifdef CONFIG_NOXS
+	u32_t ip;
+#else
 	char *ip;
+#endif
 
 	int refcount;
 
@@ -98,7 +106,7 @@ static void init_rx_buffers(struct netfront_dev *dev);
 static void netfront_fillup_rx_buffers(struct netfront_dev *dev);
 static void netfront_tx_buf_gc(struct netfront_dev *dev);
 static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
-					   unsigned char rawmac[6], char **ip);
+					   unsigned char rawmac[6], void *ip);
 static void _shutdown_netfront(struct netfront_dev *dev);
 
 static inline void add_id_to_freelist(unsigned short id, unsigned short *freelist)
@@ -131,16 +139,8 @@ __attribute__((weak)) void netif_rx_pbuf(struct pbuf *p, void *arg)
 struct eth_addr *netfront_get_hwaddr(struct netfront_dev *dev,
 				     struct eth_addr *out)
 {
-	if (sscanf(dev->mac,
-			   "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-			   &out->addr[0],
-			   &out->addr[1],
-			   &out->addr[2],
-			   &out->addr[3],
-			   &out->addr[4],
-			   &out->addr[5]) == 6) {
+	if (netfront_store_read_mac(dev, out->addr) == 0)
 		return out;
-	}
 
 	return NULL;
 }
@@ -691,7 +691,7 @@ void netfront_set_rx_handler(struct netfront_dev *dev,
 			     void *arg)
 {
 	if (dev->netif_rx && dev->netif_rx != netif_rx)
-		printk("Replacing netif_rx handler for dev %s\n", dev->nodename);
+		printk("Replacing netif_rx handler for dev %s\n", netfront_store_dev_name(dev));
 
 	dev->netif_rx = thenetif_rx;
 	dev->netif_rx_arg = arg;
@@ -1144,7 +1144,7 @@ void netfront_set_rx_pbuf_handler(struct netfront_dev *dev,
 				  void *arg)
 {
 	if (dev->netif_rx_pbuf && dev->netif_rx_pbuf != netif_rx_pbuf)
-		printk("Replacing netif_rx_pbuf handler for dev %s\n", dev->nodename);
+		printk("Replacing netif_rx_pbuf handler for dev %s\n", netfront_store_dev_name(dev));
 
 	dev->netif_rx = NULL;
 	dev->netif_rx_pbuf = thenetif_rx;
@@ -1162,8 +1162,6 @@ static void free_netfront(struct netfront_dev *dev)
 	netfront_tx_buf_gc(dev);
 	local_irq_restore(flags);
 #endif
-	free(dev->mac);
-	free(dev->backend);
 
 #ifdef CONFIG_NETMAP
 	if (dev->netmap)
@@ -1215,30 +1213,25 @@ static void free_netfront(struct netfront_dev *dev)
 		}
 	}
 #endif
+
+#ifdef CONFIG_NOXS
+    noxs_handle_destroy(&dev->noxs_dev_handle);
+#endif
 }
 
-struct netfront_dev *init_netfront(char *_nodename,
+struct netfront_dev *init_netfront(void *store_id,
 				   void (*thenetif_rx)(unsigned char* data,
 						       int len, void *arg),
 				   unsigned char rawmac[6],
-				   char **ip)
+				   void *ip)
 {
-	char nodename[256];
 	struct netfront_dev *dev;
 	struct netfront_dev_list *ldev = NULL;
 	struct netfront_dev_list *list = NULL;
-	static int netfrontends = 0;
-
-	if (!_nodename)
-		snprintf(nodename, sizeof(nodename), "device/vif/%d", netfrontends);
-	else {
-		strncpy(nodename, _nodename, sizeof(nodename) - 1);
-		nodename[sizeof(nodename) - 1] = 0;
-	}
 
 	/* Check if the device is already initialized */
 	for ( list = dev_list; list != NULL; list = list->next) {
-		if (strcmp(nodename, list->dev->nodename) == 0) {
+		if (netfront_store_dev_matches_id(list->dev, store_id)) {
 			list->refcount++;
 			dev = list->dev;
 			if (thenetif_rx)
@@ -1252,10 +1245,15 @@ struct netfront_dev *init_netfront(char *_nodename,
 
 	dev = malloc(sizeof(*dev));
 	memset(dev, 0, sizeof(*dev));
-	dev->nodename = strdup(nodename);
 #if defined(HAVE_LIBC) || defined(CONFIG_SELECT_POLL)
 	dev->fd = -1;
 #endif
+
+	if (netfront_store_pre(dev, store_id) != 0) {
+		free(dev);
+		dev = NULL;
+		goto err;
+	}
 
 #if defined(CONFIG_SELECT_POLL)
 	dev->fd = alloc_fd(FTYPE_TAP);
@@ -1283,10 +1281,8 @@ struct netfront_dev *init_netfront(char *_nodename,
 			for (list = dev_list; list->next != NULL; list = list->next);
 			list->next = ldev;
 		}
-
-		netfrontends++;
 	} else {
-		free(dev->nodename);
+		netfront_store_post(dev);
 		free(dev);
 		free(ldev);
 		dev = NULL;
@@ -1303,8 +1299,13 @@ out:
 		rawmac[5] = ldev->rawmac[5];
 	}
 	if (ip) {
-		*ip = malloc(strlen(ldev->ip) + 1);
-		strncpy(*ip, ldev->ip, strlen(ldev->ip) + 1);
+#ifdef CONFIG_NOXS
+		*((u32_t *) ip) = ldev->ip;
+#else
+		char **pstr = (char **) ip;
+		*pstr = malloc(strlen(ldev->ip) + 1);
+		strncpy(*pstr, ldev->ip, strlen(ldev->ip) + 1);
+#endif
 	}
 
 err:
@@ -1313,44 +1314,24 @@ err:
 
 static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 					   unsigned char rawmac[6],
-					   char **ip)
+					   void *ip)
 {
-	xenbus_transaction_t xbt;
-	char* err = NULL;
-	const char* message=NULL;
 	struct netif_tx_sring *txs;
 	struct netif_rx_sring *rxs;
 	int feature_split_evtchn;
-	int retry=0;
-	int i;
-	char* msg = NULL;
-	char path[256];
+	int i, rc;
 
-	snprintf(path, sizeof(path), "%s/backend-id", dev->nodename);
-	dev->dom = xenbus_read_integer(path);
-
-	snprintf(path, sizeof(path), "%s/backend", dev->nodename);
-	msg = xenbus_read(XBT_NIL, path, &dev->backend);
-	snprintf(path, sizeof(path), "%s/mac", dev->nodename);
-	msg = xenbus_read(XBT_NIL, path, &dev->mac);
-	if ((dev->backend == NULL) || (dev->mac == NULL)) {
-		printk("%s: backend/mac failed\n", __func__);
+	rc = netfront_store_init(dev, &feature_split_evtchn);
+	if (rc)
 		goto error;
-	}
 
 #ifdef CONFIG_NETMAP
-	snprintf(path, sizeof(path), "%s/feature-netmap", dev->backend);
-	dev->netmap = xenbus_read_integer(path) > 0 ? 1 : 0;
-
 	if (dev->netmap) {
 			dev->na = init_netfront_netmap(dev, dev->netif_rx);
 			goto skip;
 	}
 #endif
-	/* Check feature-split-event-channels */
-	snprintf(path, sizeof(path), "%s/feature-split-event-channels",
-		 dev->backend);
-	feature_split_evtchn = xenbus_read_integer(path) > 0 ? 1 : 0;
+
 #ifdef HAVE_LIBC
 	/* Force the use of a single event channel */
 	if (dev->netif_rx == NETIF_SELECT_RX)
@@ -1358,7 +1339,7 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 #endif
 
 	printk("************************ NETFRONT for %s **********\n\n\n",
-	       dev->nodename);
+	       netfront_store_dev_name(dev));
 
 	init_SEMAPHORE(&dev->tx_sem, NET_TX_RING_SIZE);
 	for(i=0;i<NET_TX_RING_SIZE;i++)
@@ -1445,153 +1426,16 @@ static struct netfront_dev *_init_netfront(struct netfront_dev *dev,
 
 	init_rx_buffers(dev);
 
-	dev->events = NULL;
+	rc = netfront_store_front_data_create(dev, feature_split_evtchn);
+	if (rc)
+		goto store_close;
 
-again:
-	err = xenbus_transaction_start(&xbt);
-	if (err) {
-		printk("starting transaction\n");
-		free(err);
-	}
+	rc = netfront_store_wait_be_connect(dev);
+	if (rc)
+		goto store_close;
 
-	err = xenbus_printf(xbt, dev->nodename, "tx-ring-ref","%u",
-				dev->tx_ring_ref);
-	if (err) {
-		message = "writing tx ring-ref";
-		goto abort_transaction;
-	}
-	err = xenbus_printf(xbt, dev->nodename, "rx-ring-ref","%u",
-				dev->rx_ring_ref);
-	if (err) {
-		message = "writing rx ring-ref";
-		goto abort_transaction;
-	}
-
-	if (feature_split_evtchn) {
-		err = xenbus_printf(xbt, dev->nodename,
-					"event-channel-tx", "%u", dev->tx_evtchn);
-		if (err) {
-			message = "writing event-channel-tx";
-			goto abort_transaction;
-		}
-		err = xenbus_printf(xbt, dev->nodename,
-					"event-channel-rx", "%u", dev->rx_evtchn);
-		if (err) {
-			message = "writing event-channel-rx";
-			goto abort_transaction;
-		}
-	} else {
-		err = xenbus_printf(xbt, dev->nodename,
-					"event-channel", "%u", dev->tx_evtchn);
-		if (err) {
-			message = "writing event-channel";
-			goto abort_transaction;
-		}
-	}
-
-	err = xenbus_printf(xbt, dev->nodename, "feature-rx-notify", "%u", 1);
-
-	if (err) {
-		message = "writing feature-rx-notify";
-		goto abort_transaction;
-	}
-
-#ifdef CONFIG_NETFRONT_PERSISTENT_GRANTS
-	err = xenbus_printf(xbt, dev->nodename, "feature-persistent", "%u", 1);
-
-	if (err) {
-		message = "writing feature-persistent";
-		goto abort_transaction;
-	}
-#endif
-
-	err = xenbus_printf(xbt, dev->nodename, "request-rx-copy", "%u", 1);
-
-	if (err) {
-		message = "writing request-rx-copy";
-		goto abort_transaction;
-	}
-
-#if defined(CONFIG_NETFRONT_GSO) && defined(HAVE_LWIP)
-	err = xenbus_printf(xbt, dev->nodename, "feature-sg", "%u", 1);
-
-	if (err) {
-		message = "writing feature-sg";
-		goto abort_transaction;
-	}
-
-	err = xenbus_printf(xbt, dev->nodename, "feature-gso-tcpv4", "%u", 1);
-
-	if (err) {
-		message = "writing feature-gso-tcpv4";
-		goto abort_transaction;
-	}
-
-	err = xenbus_printf(xbt, dev->nodename, "feature-gso-tcpv6", "%u", 1);
-
-	if (err) {
-		message = "writing feature-gso-tcpv6";
-		goto abort_transaction;
-	}
-#endif
-
-	snprintf(path, sizeof(path), "%s/state", dev->nodename);
-	err = xenbus_switch_state(xbt, path, XenbusStateConnected);
-	if (err) {
-		message = "switching state";
-		goto abort_transaction;
-	}
-
-	err = xenbus_transaction_end(xbt, 0, &retry);
-	free(err);
-	if (retry) {
-		goto again;
-		printk("completing transaction\n");
-	}
-
-	goto done;
-
-abort_transaction:
-	free(err);
-	err = xenbus_transaction_end(xbt, 1, &retry);
-	printk("Abort transaction %s\n", message);
-	goto error;
-
-done:
-
-	snprintf(path, sizeof(path), "%s/mac", dev->nodename);
-	msg = xenbus_read(XBT_NIL, path, &dev->mac);
-
-	if (dev->mac == NULL) {
-		printk("%s: backend/mac failed\n", __func__);
-		goto error;
-	}
-
-	printk("backend at %s\n",dev->backend);
-	printk("mac is %s\n",dev->mac);
-
-	{
-		XenbusState state;
-		char path[strlen(dev->backend) + strlen("/state") + 1];
-		snprintf(path, sizeof(path), "%s/state", dev->backend);
-
-		xenbus_watch_path_token(XBT_NIL, path, path, &dev->events);
-
-		err = NULL;
-		state = xenbus_read_integer(path);
-		while (err == NULL && state < XenbusStateConnected)
-			err = xenbus_wait_for_state_change(path, &state, &dev->events);
-		if (state != XenbusStateConnected) {
-			printk("backend not avalable, state=%d\n", state);
-			xenbus_unwatch_path_token(XBT_NIL, path, path);
-			goto error;
-		}
-
-		if (ip) {
-			snprintf(path, sizeof(path), "%s/ip", dev->backend);
-			xenbus_read(XBT_NIL, path, ip);
-		}
-	}
+	if (ip)
+		netfront_store_read_ip(dev, ip);
 
 	printk("**************************\n");
 
@@ -1605,24 +1449,17 @@ skip:
 		connect_netfront(dev);
 #endif
 
-	/* Special conversion specifier 'hh' needed for __ia64__. Without
-	   this mini-os panics with 'Unaligned reference'. */
 	if (rawmac)
-		sscanf(dev->mac,"%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-				&rawmac[0],
-				&rawmac[1],
-				&rawmac[2],
-				&rawmac[3],
-				&rawmac[4],
-				&rawmac[5]);
+		netfront_store_read_mac(dev, rawmac);
 
 #ifdef CONFIG_NETFRONT_STATS
 	netfront_reset_txcounters(dev);
 #endif
 	return dev;
+
+store_close:
+	netfront_store_fini(dev);
 error:
-	free(msg);
-	free(err);
 	free_netfront(dev);
 	return NULL;
 }
@@ -1646,7 +1483,7 @@ void shutdown_netfront(struct netfront_dev *dev)
 	list->refcount--;
 	if (list->refcount == 0) {
 		_shutdown_netfront(dev);
-		free(dev->nodename);
+		netfront_store_post(dev);
 		free(dev);
 
 		to_del = list;
@@ -1663,69 +1500,13 @@ void shutdown_netfront(struct netfront_dev *dev)
 
 static void _shutdown_netfront(struct netfront_dev *dev)
 {
-	char* err = NULL, *err2;
-	XenbusState state;
-	char path[strlen(dev->backend) + strlen("/state") + 1];
-	char nodename[strlen(dev->nodename) + strlen("/request-rx-copy") + 1];
+	int rc;
 
-	printk("close network: backend at %s\n",dev->backend);
+	rc = netfront_store_wait_be_disconnect(dev);
+	rc = netfront_store_front_data_destroy(dev);
+	netfront_store_fini(dev);
 
-	snprintf(path, sizeof(path), "%s/state", dev->backend);
-	snprintf(nodename, sizeof(nodename), "%s/state", dev->nodename);
-#ifdef CONFIG_NETMAP
-	if (dev->netmap)
-		shutdown_netfront_netmap(dev);
-#endif
-
-	if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateClosing)) != NULL) {
-		printk("shutdown_netfront: error changing state to %d: %s\n",
-				XenbusStateClosing, err);
-		goto close;
-	}
-	state = xenbus_read_integer(path);
-	while (err == NULL && state < XenbusStateClosing)
-		err = xenbus_wait_for_state_change(path, &state, &dev->events);
-	free(err);
-
-	if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateClosed)) != NULL) {
-		printk("shutdown_netfront: error changing state to %d: %s\n",
-				XenbusStateClosed, err);
-		goto close;
-	}
-	state = xenbus_read_integer(path);
-	while (state < XenbusStateClosed) {
-		err = xenbus_wait_for_state_change(path, &state, &dev->events);
-		free(err);
-	}
-
-	if ((err = xenbus_switch_state(XBT_NIL, nodename, XenbusStateInitialising)) != NULL) {
-		printk("shutdown_netfront: error changing state to %d: %s\n",
-				XenbusStateInitialising, err);
-		goto close;
-	}
-	state = xenbus_read_integer(path);
-	while (err == NULL && (state < XenbusStateInitWait || state >= XenbusStateClosed))
-		err = xenbus_wait_for_state_change(path, &state, &dev->events);
-
-close:
-	free(err);
-	err2 = xenbus_unwatch_path_token(XBT_NIL, path, path);
-	free(err2);
-
-	snprintf(nodename, sizeof(nodename), "%s/tx-ring-ref", dev->nodename);
-	err2 = xenbus_rm(XBT_NIL, nodename);
-	free(err2);
-	snprintf(nodename, sizeof(nodename), "%s/rx-ring-ref", dev->nodename);
-	err2 = xenbus_rm(XBT_NIL, nodename);
-	free(err2);
-	snprintf(nodename, sizeof(nodename), "%s/event-channel", dev->nodename);
-	err2 = xenbus_rm(XBT_NIL, nodename);
-	free(err2);
-	snprintf(nodename, sizeof(nodename), "%s/request-rx-copy", dev->nodename);
-	err2 = xenbus_rm(XBT_NIL, nodename);
-	free(err2);
-
-	if (!err)
+	if (!rc)
 		free_netfront(dev);
 }
 

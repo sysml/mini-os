@@ -587,15 +587,23 @@ void start_networking(void)
     tprintk("Starting networking\n");
 
     /* init netfront */
+#ifdef CONFIG_NOXS
+    dev = init_netfront(NULL, NULL, NULL, &ip.addr);
+#else
     dev = init_netfront(NULL, NULL, NULL, &ifip);
+#endif
     if (!dev) {
         tprintk("Could not init netfront\n");
         goto err_out;
     }
+#ifndef CONFIG_NOXS
     if (ifip) {
         tprintk("Got IP address %s\n", ifip);
 
         ip.addr = inet_addr(ifip);
+#else
+    if (1) {
+#endif
 	if (IN_CLASSA(ntohl(ip.addr))) {
 	    tprintk("Use class A netmask (255.0.0.0)\n");
 	    mask.addr = htonl(IN_CLASSA_NET);

@@ -113,6 +113,12 @@ src-$(CONFIG_XENBUS) += lib/xs.c
 src-$(CONFIG_XENBUS) += xenbus/xenbus.c
 src-$(CONFIG_NOXS) += xenbus/noxs.c
 
+ifeq ($(CONFIG_NOXS),y)
+src-$(CONFIG_NETFRONT) += xenbus/netfront_store_noxs.c
+else
+src-$(CONFIG_NETFRONT) += xenbus/netfront_store_xenbus.c
+endif
+
 src-y += console/console.c
 src-y += console/xencons_ring.c
 src-$(CONFIG_CONSFRONT) += console/xenbus.c

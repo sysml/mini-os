@@ -1,5 +1,8 @@
 #include <mini-os/wait.h>
 #include <mini-os/semaphore.h>
+#ifdef CONFIG_NOXS
+#include <mini-os/noxs.h>
+#endif
 #ifdef HAVE_LWIP
 #include <lwip/netif.h>
 #include <lwip/netif/etharp.h>
@@ -83,16 +86,22 @@ struct netfront_dev {
 	evtchn_port_t tx_evtchn;
 	evtchn_port_t rx_evtchn;
 
+#ifdef CONFIG_NOXS
+	char *name;
+	noxs_vif_ctrl_page_t *vif_page;
+	struct noxs_dev_handle noxs_dev_handle;
+#else
 	char *nodename;
 	char *backend;
 	char *mac;
+
+	xenbus_event_queue events;
+#endif
+
 #ifdef CONFIG_NETMAP
 	int netmap;
 	void *na;
 #endif
-
-	xenbus_event_queue events;
-
 
 #ifdef HAVE_LIBC
 	int fd;
@@ -119,7 +128,7 @@ void netfront_rx(struct netfront_dev *dev);
 void netfront_set_rx_handler(struct netfront_dev *dev, void (*thenetif_rx)(unsigned char* data, int len, void *arg), void *arg);
 void netfront_xmit(struct netfront_dev *dev, unsigned char* data, int len);
 #endif
-struct netfront_dev *init_netfront(char *nodename, void (*netif_rx)(unsigned char *data, int len, void *arg), unsigned char rawmac[6], char **ip);
+struct netfront_dev *init_netfront(void *store_id, void (*netif_rx)(unsigned char *data, int len, void *arg), unsigned char rawmac[6], void *ip);
 #ifdef HAVE_LWIP
 void netfront_set_rx_pbuf_handler(struct netfront_dev *dev, void (*thenetif_rx)(struct pbuf *p, void *arg), void *arg);
 err_t netfront_xmit_pbuf(struct netfront_dev *dev, struct pbuf *p, int co_type, int push);
@@ -165,3 +174,22 @@ int netfront_get_fd(struct netfront_dev *dev);
 void netfront_reset_txcounters(struct netfront_dev *dev);
 void netfront_get_txcounters(struct netfront_dev *dev, uint64_t *out_txpkts, uint64_t *out_txbytes);
 #endif
+
+/*
+ * STORE FUNCTIONS
+ */
+int netfront_store_dev_matches_id(struct netfront_dev *dev, void *store_id);
+const char *netfront_store_dev_name(struct netfront_dev *dev);
+
+int netfront_store_pre(struct netfront_dev *dev, void *store_id);
+void netfront_store_post(struct netfront_dev *dev);
+
+int netfront_store_init(struct netfront_dev *dev, int *is_split_evtchn);
+void netfront_store_fini(struct netfront_dev *dev);
+
+int netfront_store_front_data_create(struct netfront_dev *dev, int split_evtchn);
+int netfront_store_front_data_destroy(struct netfront_dev *dev);
+int netfront_store_wait_be_connect(struct netfront_dev *dev);
+int netfront_store_wait_be_disconnect(struct netfront_dev *dev);
+int netfront_store_read_mac(struct netfront_dev *dev, unsigned char rawmac[6]);
+void netfront_store_read_ip(struct netfront_dev *dev, void *out);
