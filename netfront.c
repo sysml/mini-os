@@ -653,12 +653,12 @@ static void netfront_fillup_rx_buffers(struct netfront_dev *dev)
 		dev->rx.req_prod_pvt = prod;
 		wmb();
 		RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&dev->rx, notify);
-#ifdef CONFIG_SELECT_POLL
-		files[dev->fd].read = 0;
-#endif
 		if (notify)
 			notify_remote_via_evtchn(dev->rx_evtchn);
 	}
+#ifdef CONFIG_SELECT_POLL
+	files[dev->fd].read = 0;
+#endif
 }
 
 void netfront_rx(struct netfront_dev *dev)
