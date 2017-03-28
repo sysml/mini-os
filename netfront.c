@@ -1348,6 +1348,16 @@ struct netfront_dev *init_netfront(char *_nodename,
 #if defined(HAVE_LIBC) || defined(CONFIG_SELECT_POLL)
 	dev->fd = -1;
 #endif
+
+#if defined(CONFIG_SELECT_POLL)
+	dev->fd = alloc_fd(FTYPE_TAP);
+	if (dev->fd < 0) {
+		free(dev);
+		dev = NULL;
+		goto err;
+	}
+	files[dev->fd].read = 0;
+#endif
 	dev->netif_rx = thenetif_rx;
 	dev->netif_rx_arg = NULL;
 
@@ -1698,10 +1708,6 @@ skip:
 				&rawmac[4],
 				&rawmac[5]);
 
-#ifdef CONFIG_SELECT_POLL
-	dev->fd = alloc_fd(FTYPE_TAP);
-	files[dev->fd].read = 0;
-#endif
 #ifdef CONFIG_NETFRONT_STATS
 	netfront_reset_txcounters(dev);
 #endif
