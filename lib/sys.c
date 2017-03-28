@@ -899,11 +899,11 @@ static int select_poll(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exce
 int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 	struct timeval *timeout)
 {
-    int n, tout, ret;
-    unsigned long mask;
+    int n, ret;
+    unsigned long mask, mask_dummy;
     fd_set myread, mywrite, myexcept;
-    s_time_t start, diff, stop;
-    struct thread *curr;
+    struct thread *thread = get_current();
+    s_time_t start = NOW(), stop;
 #ifdef CONFIG_NETFRONT
     DEFINE_WAIT(netfront_w);
 #endif
@@ -920,26 +920,67 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
     DEFINE_WAIT(console_w);
     DEFINE_WAIT(pipe_w);
 
-    start = NOW();
-    curr = get_current();
-    n = 0;
-    tout = 0;
+    /* TODO - this assertion was in upstream mini-os */
+    /* assert(thread == main_thread); */
 
-    ret = -1;
-    for (;;) {
-        if (tout) {
-            ret = n;
-            break;
-        }
-        if (readfds)
-            memcpy(&myread, readfds, sizeof(fd_set));
-        if (writefds)
-            memcpy(&mywrite, writefds, sizeof(fd_set));
-        if (exceptfds)
-            memcpy(&myexcept, exceptfds, sizeof(fd_set));
-        mask = 0;
-        n = select_poll(nfds, &myread, &mywrite, &myexcept, &mask);
-        if (n <= 0) { // Sleep until the timeout
+    DEBUG("select(%d, ", nfds);
+    dump_set(nfds, readfds, writefds, exceptfds, timeout);
+    DEBUG(");\n");
+
+    if (timeout)
+	stop = start + SECONDS(timeout->tv_sec) + timeout->tv_usec * 1000;
+    else
+	/* just make gcc happy */
+	stop = start;
+
+    if (readfds)
+        myread = *readfds;
+    else
+        FD_ZERO(&myread);
+    if (writefds)
+        mywrite = *writefds;
+    else
+        FD_ZERO(&mywrite);
+    if (exceptfds)
+        myexcept = *exceptfds;
+    else
+        FD_ZERO(&myexcept);
+
+    DEBUG("polling ");
+    dump_set(nfds, &myread, &mywrite, &myexcept, timeout);
+    DEBUG("\n");
+    mask = 0;
+    n = select_poll(nfds, &myread, &mywrite, &myexcept, &mask);
+
+    if (n) {
+	dump_set(nfds, readfds, writefds, exceptfds, timeout);
+	if (readfds)
+	    *readfds = myread;
+	if (writefds)
+	    *writefds = mywrite;
+	if (exceptfds)
+	    *exceptfds = myexcept;
+	DEBUG(" -> ");
+	dump_set(nfds, readfds, writefds, exceptfds, timeout);
+	DEBUG("\n");
+	wake(thread);
+	ret = n;
+	goto out_ret;
+    }
+    if (timeout && NOW() >= stop) {
+	if (readfds)
+	    FD_ZERO(readfds);
+	if (writefds)
+	    FD_ZERO(writefds);
+	if (exceptfds)
+	    FD_ZERO(exceptfds);
+	timeout->tv_sec = 0;
+	timeout->tv_usec = 0;
+	wake(thread);
+	ret = 0;
+	goto out_ret;
+    }
+
 #ifdef CONFIG_NETFRONT
             if (mask & GET_SELECT_MASK(FTYPE_TAP))
                 add_waiter(netfront_w, netfront_queue);
@@ -964,18 +1005,39 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
             if (mask & GET_SELECT_MASK(FTYPE_PIPE))
                 add_waiter(pipe_w, pipe_queue);
 
-            if (timeout) {
-                diff = SECONDS(timeout->tv_sec) + timeout->tv_usec * 1000;
-                stop = start + diff;
-            } else {
-                diff = 0;
-                stop = start;
-            }
-            curr->wakeup_time = stop;
-            schedule();
-            if (NOW() > stop) {
-                tout = 1;
-            }
+    if (timeout)
+	thread->wakeup_time = stop;
+    schedule();
+
+    if (readfds)
+        myread = *readfds;
+    else
+        FD_ZERO(&myread);
+    if (writefds)
+        mywrite = *writefds;
+    else
+        FD_ZERO(&mywrite);
+    if (exceptfds)
+        myexcept = *exceptfds;
+    else
+        FD_ZERO(&myexcept);
+
+    n = select_poll(nfds, &myread, &mywrite, &myexcept, &mask_dummy);
+
+    if (n) {
+	if (readfds)
+	    *readfds = myread;
+	if (writefds)
+	    *writefds = mywrite;
+	if (exceptfds)
+	    *exceptfds = myexcept;
+	ret = n;
+	goto out;
+    }
+    errno = EINTR;
+    ret = -1;
+
+out:
 #ifdef CONFIG_NETFRONT
             if (mask & GET_SELECT_MASK(FTYPE_TAP))
                 remove_waiter(netfront_w, netfront_queue);
@@ -999,17 +1061,7 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 
             if (mask & GET_SELECT_MASK(FTYPE_PIPE))
                 remove_waiter(pipe_w, pipe_queue);
-        } else { // Any events occur, out from select
-            ret = n;
-            break;
-        }
-    }
-    if (readfds)
-        memcpy(readfds, &myread, sizeof(fd_set));
-    if (writefds)
-        memcpy(writefds, &mywrite, sizeof(fd_set));
-    if (exceptfds)
-        memcpy(exceptfds, &myexcept, sizeof(fd_set));
+out_ret:
     return ret;
 }
 
