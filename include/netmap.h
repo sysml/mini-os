@@ -3,39 +3,39 @@
  *
  *   file: netmap.h
  *
- *          NEC Europe Ltd. PROPRIETARY INFORMATION
- *
- * This software is supplied under the terms of a license agreement
- * or nondisclosure agreement with NEC Europe Ltd. and may not be
- * copied or disclosed except in accordance with the terms of that
- * agreement. The software and its source code contain valuable trade
- * secrets and confidential information which have to be maintained in
- * confidence.
- * Any unauthorized publication, transfer to third parties or duplication
- * of the object or source code - either totally or in part – is
- * prohibited.
- *
- *      Copyright (c) 2014 NEC Europe Ltd. All Rights Reserved.
- *
  * Authors: Joao Martins <joao.martins@neclab.eu>
  *
- * NEC Europe Ltd. DISCLAIMS ALL WARRANTIES, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO IMPLIED WARRANTIES OF MERCHANTABILITY
- * AND FITNESS FOR A PARTICULAR PURPOSE AND THE WARRANTY AGAINST LATENT
- * DEFECTS, WITH RESPECT TO THE PROGRAM AND THE ACCOMPANYING
- * DOCUMENTATION.
  *
- * No Liability For Consequential Damages IN NO EVENT SHALL NEC Europe
- * Ltd., NEC Corporation OR ANY OF ITS SUBSIDIARIES BE LIABLE FOR ANY
- * DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES FOR LOSS
- * OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF INFORMATION, OR
- * OTHER PECUNIARY LOSS AND INDIRECT, CONSEQUENTIAL, INCIDENTAL,
- * ECONOMIC OR PUNITIVE DAMAGES) ARISING OUT OF THE USE OF OR INABILITY
- * TO USE THIS PROGRAM, EVEN IF NEC Europe Ltd. HAS BEEN ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
+ * Copyright (c) 2014, NEC Europe Ltd., NEC Corporation. All rights reserved.
  *
- *     THIS HEADER MAY NOT BE EXTRACTED OR MODIFIED IN ANY WAY.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its
+ *    contributors may be used to endorse or promote products derived from
+ *    this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * THIS HEADER MAY NOT BE EXTRACTED OR MODIFIED IN ANY WAY.
  */
+
 #ifndef _NET_NETMAP_MINI_H_
 #define _NET_NETMAP_MINI_H_
 
