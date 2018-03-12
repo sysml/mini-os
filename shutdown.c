@@ -1,7 +1,7 @@
 /*
  *          MiniOS
  *
- *   file: fromdevice.cc
+ *   file: shutdown.c
  *
  * Authors: Joao Martins <joao.martins@neclab.eu>
  *
