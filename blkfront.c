@@ -38,9 +38,14 @@ DECLARE_WAIT_QUEUE_HEAD(blkfront_queue);
 #define BLK_RING_SIZE __RING_SIZE((struct blkif_sring *)0, PAGE_SIZE)
 #define GRANT_INVALID_REF 0
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
-#define BLK_BUFFER_PAGES_N BLK_RING_SIZE * BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST
+/* FIXME: Use less pages, this is currently probably over-dimensioned: How many?
+ * Each page causes a grant. Less number of pages just cause I/O potentially
+ * being slower. There is probably a threshold. The minimum requirement is
+ * BLKIF_MAX_SEGMENTS_PER_REQUEST
+ */
+#define BLK_BUFFER_PAGES_N ((BLK_RING_SIZE) * (BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST))
 #else
-#define BLK_BUFFER_PAGES_N BLK_RING_SIZE * BLKIF_MAX_SEGMENTS_PER_REQUEST
+#define BLK_BUFFER_PAGES_N ((BLK_RING_SIZE) * (BLKIF_MAX_SEGMENTS_PER_REQUEST))
 #endif
 
 struct blk_buffer {
@@ -48,6 +53,7 @@ struct blk_buffer {
     grant_ref_t gref;
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
     int inflight;
+    struct blk_buffer *next;
 #endif
 };
 
@@ -59,7 +65,11 @@ struct blkfront_dev {
     evtchn_port_t evtchn;
     blkif_vdev_t handle;
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
-    struct blk_buffer *pt_pool;
+    struct {
+	struct blk_buffer *pool;
+	    struct blk_buffer *head;
+	unsigned int avail;
+    } pt_pool;
 #endif
 
     char *nodename;
@@ -72,6 +82,34 @@ struct blkfront_dev {
     int fd;
 #endif
 };
+
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+#define blkfront_ptpool_avail(dev) \
+	((dev)->pt_pool.avail)
+
+/* get element */
+static inline struct blk_buffer *blkfront_ptpool_get(struct blkfront_dev *dev)
+{
+	struct blk_buffer *ret;
+
+	if (unlikely(!blkfront_ptpool_avail(dev)))
+		return NULL;
+
+	ret = dev->pt_pool.head;
+	dev->pt_pool.head = ret->next;
+	--dev->pt_pool.avail;
+	return ret;
+}
+
+/* prepend element */
+static inline void blkfront_ptpool_put(struct blkfront_dev *dev,
+				       struct blk_buffer *buffer)
+{
+	buffer->next = dev->pt_pool.head;
+	dev->pt_pool.head = buffer;
+	++dev->pt_pool.avail;
+}
+#endif
 
 void blkfront_handler(evtchn_port_t port, struct pt_regs *regs, void *data)
 {
@@ -89,14 +127,14 @@ static void free_blkfront(struct blkfront_dev *dev)
 {
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
 	int iter;
-	if (dev->pt_pool != NULL) {
+	if (dev->pt_pool.pool != NULL) {
 		for (iter = 0; iter < BLK_BUFFER_PAGES_N; iter++) {
-			if (dev->pt_pool[iter].inflight)
-				printk("gnttab_end_access %d -- %u\n", iter, dev->pt_pool[iter].gref);
-			gnttab_end_access(dev->pt_pool[iter].gref);
-			free_page(dev->pt_pool[iter].page);
+			if (dev->pt_pool.pool[iter].inflight)
+				printk("gnttab_end_access %d -- %u\n", iter, dev->pt_pool.pool[iter].gref);
+			gnttab_end_access(dev->pt_pool.pool[iter].gref);
+			free_page(dev->pt_pool.pool[iter].page);
 		}
-		free(dev->pt_pool);
+		free(dev->pt_pool.pool);
 	}
 #endif
     mask_evtchn(dev->evtchn);
@@ -149,13 +187,16 @@ struct blkfront_dev *init_blkfront(char *_nodename, struct blkfront_info *info)
 
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
     int iter;
-    dev->pt_pool = xmalloc_array(struct blk_buffer, BLK_BUFFER_PAGES_N);
+    dev->pt_pool.pool = _xmalloc(BLK_BUFFER_PAGES_N * sizeof(struct blk_buffer), sizeof(void *));
+    ASSERT(dev->pt_pool.pool);
+    memset(dev->pt_pool.pool, 0xff, BLK_BUFFER_PAGES_N * sizeof(struct blk_buffer));
     for (iter = 0; iter < BLK_BUFFER_PAGES_N; iter++) {
-        dev->pt_pool[iter].page = (char*)alloc_page();
-        *(char*)(dev->pt_pool[iter].page) = 0; /* Trigger CoW if needed */
-        barrier();
-        dev->pt_pool[iter].gref = gnttab_grant_access(dev->dom, virt_to_mfn(dev->pt_pool[iter].page), 0);
-        dev->pt_pool[iter].inflight = 0;
+	dev->pt_pool.pool[iter].page = (char*)alloc_page();
+	ASSERT(dev->pt_pool.pool[iter].page);
+        *(char*)(dev->pt_pool.pool[iter].page) = 0; /* Trigger CoW if needed */
+        dev->pt_pool.pool[iter].gref = gnttab_grant_access(dev->dom, virt_to_mfn(dev->pt_pool.pool[iter].page), 0);
+	dev->pt_pool.pool[iter].inflight = 0;
+	blkfront_ptpool_put(dev, &dev->pt_pool.pool[iter]);
     }
     printk("persistent grants: %d pages allocated, %d KB overhead, max %d pages per request\n",
            BLK_BUFFER_PAGES_N, (BLK_BUFFER_PAGES_N * (sizeof(struct blk_buffer) + PAGE_SIZE)) / 1024, BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST);
@@ -540,8 +581,14 @@ void blkfront_aio_nosched(struct blkfront_aiocb *aiocbp, int write)
     blkfront_aio_submit(dev);
 }
 
-#define blkfront_req_available(dev, n) \
-  (((dev)->ring.req_prod_pvt - (dev)->ring.rsp_cons) < (BLK_RING_SIZE - (n)))
+#ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
+#define blkfront_req_available(dev, n)		\
+	(RING_FREE_REQUESTS(&(dev)->ring) >= (n))
+#else
+#define blkfront_req_available(dev, n)		\
+	((RING_FREE_REQUESTS(&(dev)->ring) >= (n)) && \
+	 blkfront_ptpool_avail(dev) >= (n))
+#endif
 
 int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write)
 {
@@ -551,7 +598,6 @@ int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write)
     int n, j;
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
     struct blk_buffer *buffer;
-    int p;
 #else
     uintptr_t start, end;
 #endif
@@ -613,11 +659,11 @@ int blkfront_aio_enqueue(struct blkfront_aiocb *aiocbp, int write)
     req->seg[n-1].last_sect = (((uintptr_t)aiocbp->aio_buf + aiocbp->aio_nbytes - 1) & ~PAGE_MASK) / 512;
 #endif
 #ifdef CONFIG_BLKFRONT_PERSISTENT_GRANTS
-    for (j = 0, p = ((i) % BLK_RING_SIZE) * BLKIF_MAX_PRSNT_GNT_SEGMENTS_PER_REQUEST;
-         j < n;
-         ++j, ++p) {
-        buffer = &dev->pt_pool[p];
+    for (j = 0; j < n; ++j) {
+	buffer = blkfront_ptpool_get(dev);
+	ASSERT(buffer);
         ASSERT(buffer->inflight == 0);
+
         aiocbp->prst_buffer[j] = buffer;
         req->seg[j].gref = buffer->gref;
         buffer->inflight = 1;
@@ -788,6 +834,7 @@ moretodo:
                     ASSERT(buffer->inflight == 1);
                     _fmemcpy256((void *) data, buffer->page, PAGE_SIZE);
                     buffer->inflight = 0;
+		    blkfront_ptpool_put(dev, buffer);
                     data += PAGE_SIZE;
                     left -= PAGE_SIZE;
                     ++j;
@@ -797,6 +844,7 @@ moretodo:
                     ASSERT(buffer->inflight == 1);
                     _fmemcpy256((void *) data, buffer->page, left);
                     buffer->inflight = 0;
+		    blkfront_ptpool_put(dev, buffer);
                     ++j;
                 }
                 ASSERT(j == aiocbp->n);
