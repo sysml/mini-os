@@ -746,7 +746,7 @@ int blkfront_aio_poll(struct blkfront_dev *dev)
     RING_IDX rp, cons;
     struct blkif_response *rsp;
     int more;
-    int nr_consumed;
+    int nr_consumed = 0;
 
 moretodo:
 #ifdef HAVE_LIBC
@@ -760,7 +760,6 @@ moretodo:
     rmb(); /* Ensure we see queued responses up to 'rp'. */
     cons = dev->ring.rsp_cons;
 
-    nr_consumed = 0;
     while ((cons != rp))
     {
         struct blkfront_aiocb *aiocbp;
