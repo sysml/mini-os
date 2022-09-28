@@ -31,7 +31,6 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  *
- * THIS HEADER MAY NOT BE EXTRACTED OR MODIFIED IN ANY WAY.
  *
  * This file is based on Ethernet Interface skeleton (ethernetif.c)
  * provided by lwIP-1.4.1, copyrights as below.
